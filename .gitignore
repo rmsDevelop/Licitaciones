@@ -1,0 +1,8 @@
+# datos (ZIPs cacheados, referencias descargadas, parquet) — no son código
+Data/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

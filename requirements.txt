@@ -1,0 +1,11 @@
+# Nuevo_Licitaciones — runtime de Scraper/scrape.py
+# Recrear:  uv venv .venv --python 3.12 && uv pip install -r requirements.txt
+# Versiones pinadas a las del runtime probado en el primer scrape completo
+# (2026-09-01, ../Licitaciones/.venv: python 3.12.14). Las dependencias de
+# fases posteriores (xgboost en training.py, fastapi en api.py) se añadirán
+# cuando esos ficheros existan.
+
+pandas==3.0.3
+numpy==2.5.1
+pyarrow==25.0.0
+requests==2.34.2

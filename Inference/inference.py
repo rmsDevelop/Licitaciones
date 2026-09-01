@@ -1,0 +1,2 @@
+#Este archivo debe recibir un archivo con un conjunto de licitaciones en formato raw como el de licitaciones_espana. 
+#Utilizará featurer.py para caracterizar el conjunto. Adherirá la inferencia de num_ofertas, zero_discount y discount.
