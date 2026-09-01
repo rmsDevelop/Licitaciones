@@ -71,11 +71,15 @@ probado de `Licitaciones`, con sus fixes.
 
 ### Operativa
 
-- Ejecutar: `python -u Scraper/scrape.py [--anos 2021-2026] [--force] [--data-dir DIR]`
+- Ejecutar: `.venv/bin/python -u Scraper/scrape.py [--anos 2021-2026] [--force] [--data-dir DIR]`
   (`-u`: sin él, el stdout buffereado oculta el progreso).
-- **Python: venv prestado de `../Licitaciones`** (pandas 3.0.3,
-  requests 2.34.2, pyarrow 25). Este repo aún no tiene venv ni
-  `requirements.txt` — pendiente consensuar.
+- **Python: venv propio** (`.venv`, CPython 3.12.14 via uv) con
+  `requirements.txt` pinado al runtime probado. Recrear:
+  `uv venv .venv --python 3.12 && uv pip install -r requirements.txt`.
+  Las dependencias de fases posteriores (xgboost, fastapi…) se añaden
+  cuando existan esos ficheros.
+- **Git**: repo en rama `main`. `Data/` (ZIPs, referencias, parquet,
+  ~9 GB) y `.venv/` están gitignored — solo entra código y documentación.
 - En disco: `Data/downloads/` ~8 GB de ZIPs (cache, re-utilizable),
   `Data/references/` ~490 MB, parquet 600 MB. ~9 GB en total.
 - El mensual del mes en curso aún no existe: PLACSP devuelve un
@@ -92,7 +96,9 @@ Descarga ~8 GB ≈ 10 min (línea rápida, cacheable); parse licitaciones
 
 1. `Scraper/update.py` — refresco incremental de los últimos X meses
    (reutiliza las primitivas de scrape.py; preserva `ml_estado`/preds).
-2. `requirements.txt` + venv propio.
-3. `Modeling/cleaning.py` — clasificar training/filtered (criterios de
+2. `Modeling/cleaning.py` — clasificar training/filtered (criterios de
    Licitaciones-Lab; aquí entra el recorte de población ≥2021 si procede).
-4. `Modeling/featurer.py` → `Modeling/training.py` → `Inference/` → `Dashboard/`.
+3. `Modeling/featurer.py` → `Modeling/training.py` → `Inference/` → `Dashboard/`.
+
+`requirements.txt` + venv propio + git (main, `Data/` ignorado) quedaron
+listos el 2026-09-02, antes de iniciar update.py.
