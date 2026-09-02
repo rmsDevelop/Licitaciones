@@ -160,11 +160,106 @@ quedar desfasadas hasta la próxima inferencia.
 
 ---
 
+## 2026-09-02 — `Modeling/` (cleaning.py + featurer.py + training.py)
+
+**Estado: HECHO.** Pipeline ML completo portado de Licitaciones-Lab y
+ejecutado sobre `Data/licitaciones.parquet` (3.630.925 filas):
+`cleaning.py` clasifica `ml_estado`, `featurer.py` genera
+`Data/features.parquet` (3.516.651 filas train × 68 cols) y `training.py`
+entrena las 6 líneas y guarda `Models/` (6 `.ubj` + 6 `.meta.json`).
+
+### cleaning.py
+
+Rellena `ml_estado` in place (escritura atómica, mismo esquema/compresión que
+scrape.py): **'train' | 'filtered' | null (abierta)**. Se ejecuta tras la
+evaluación: toda fila válida pasa a 'train' (sin reserva de test); el split
+train/val lo hace training.py. Recalcula desde las columnas raw en cada run
+(idempotente, sin historial). Precedencia: fuera de ventana → 'filtered';
+expediente abierto → null; cerrado en ventana → 'train' si algún objetivo es
+válido ('filtered' si no). Criterios del Lab: `fix_ano` (bug 2 dígitos, sanidad
+2000..año en curso), ventana ≥2021; licitaciones exige `estado ∈
+{Resuelta, Adjudicada}`; válida = num_ofertas ∈ [0,50] **o** importes sanos
+con discount_pct ∈ [0,70] (licitaciones base con-IVA, menores sin-IVA sin
+filtro de estado). Resultado: lic 756.555 train / 42.233 filtered / 69.105
+abiertas; menores 2.760.096 / 1.457 / 1.479. Verificado en sandbox:
+idempotente, 0 train fuera de ventana o sin objetivo, 0 abiertas con datos,
+0 ids duplicados, esquema intacto.
+
+### featurer.py
+
+`Data/features.parquet` = filas train de ambos conjuntos: `id/conjunto/ano/
+fecha_publicacion` (claves) + 3 objetivos (`num_ofertas`, `discount_pct`
+derivado por base del conjunto, `zero_discount`=(disc==0)) + **unión** de
+features de las 6 líneas del Lab (mismas transformaciones: CPV/NUTS/dinero/
+duración/tiempo/keywords de objeto/missingness/volúmenes prior-año; mismas
+reglas de leakage). Donde las líneas del Lab discrepaban, la tabla lleva
+variantes con sufijo (`budget_to_estimado_con_iva_raw|_cap`,
+`log_duracion_days_raw`, `log_budget_sin_iva`, `importe_sin_iva` kept en
+menores) y **`FEATURES_LINEA`** (dict en el código) define la lista exacta por
+línea — el contrato compartido con training.py e Inference/. Los INTs de
+validez (VAL-01/04/05/14, FIA-11) caen por varianza cero en población limpia
+(el Lab los dropeaba igual). `row_missing_count` sobre raw+calidad+objetivos.
+
+### training.py
+
+6 entrenamientos secuenciales con GPU (GTX 1660 Ti, `device=cuda`, fallback
+CPU por línea). HPs = campeones del Lab: lic num **log1p+TE d13 lr.03** | lic
+zd **d14 lr.05 spw=auto floor P≥0.80** | lic disc **pseudohuber d14 lr.03
+sub.9** | men num **log1p+TE d13 lr.03** | men zd **d13 lr.03 spw=none floor
+P≥0.95** | men disc **pseudohuber+TE d14 lr.03**. TE = encodings suavizados
+(α=30) de órgano/dir3/ciudad fit en TRAIN, mapas guardados en el meta.
+Receta de entrega: población por objetivo → split cronológico VAL=últimos 6
+meses → **sonda** early-stop (TRAIN vs VAL) da rounds+buffer 50, métricas
+honestas de VAL y el umbral del router (recall@P≥floor) → **booster de
+producción** = refit con todas las filas y rounds congelados. Líneas discount
+además reportan el **MAE de sistema** (gate duro p_zero≥umbral→0) con las
+probs de la sonda zd de su conjunto, alineadas por id.
+
+### Resultados (VAL honesto, sonda; referencia Lab entre paréntesis)
+
+| Línea | Métrica | Sistema |
+|---|---|---|
+| licitaciones/num_ofertas | MAE 1,077 (0,99) | — |
+| licitaciones/zero_discount | AUC-PR 0,911 (0,936), R@P0,80 0,855, umbral 0,405 | — |
+| licitaciones/discount | MAE 8,38 | **8,21** (6,78) |
+| menores/num_ofertas | MAE 0,286 (0,30) | — |
+| menores/zero_discount | AUC-PR 0,994, umbral 0,442 | — |
+| menores/discount | MAE 1,35 | **1,31** (1,42) |
+
+Menores al nivel del Lab; licitaciones algo por debajo (VENTANA distinta:
+6 meses vs su TEST de 3; bias −3 del regresor en meses recientes). Duración
+total del run: ~35 min.
+
+### Contrato de Inference/ (verificado cargando los .ubj + meta)
+
+- Features: `meta['features']`; para columnas `_te` construir desde la raw
+  (claves de `meta['target_encoding']['maps']`) con `.map(maps).fillna(gmean)`.
+- Categóricas: `pd.Categorical` con los niveles de `meta['categorical_levels']`;
+  niveles no vistos → enmascarar a NA antes (`s.where(s.isin(niveles))` — el
+  constructor directo con valores fuera está deprecado en pandas y cambiará a
+  error); el resto de columnas a float32.
+- Salida: num_ofertas → `expm1` + clip [0,50]; zero_discount → prob, pred =
+  prob ≥ `meta['umbral']`; discount → clip [0,70]; sistema → pred final =
+  0 si p_zero ≥ umbral. Servir en cadena num → zd → discount (discount puede
+  consumir `num_ofertas_pred` como feature serve-time).
+
+### Notas operativas
+
+- Ejecutar: `.venv/bin/python -u Modeling/{cleaning,featurer,training}.py`
+  (`--data-dir`, `--dry-run` en cleaning; `--solo <substring>` y `--device` en
+  training). Orden: update → (evaluación) → cleaning → featurer → training.
+- `requirements.txt`: añadidos xgboost 3.4.1, scikit-learn 1.9.0, scipy 1.18.1.
+- `Models/` gitignored (regenerable): ojo, los boosters son grandes (~5 GB
+  totales; d13/d14 con >1000 rounds sobre millones de filas).
+- `Data/features.parquet` (188 MB) también gitignored (regenerable).
+
+---
+
 ## Pendiente (orden propuesto, a consensuar)
 
-1. `Modeling/cleaning.py` — clasificar training/filtered (criterios de
-   Licitaciones-Lab; aquí entra el recorte de población ≥2021 si procede).
-2. `Modeling/featurer.py` → `Modeling/training.py` → `Inference/` → `Dashboard/`.
+1. `Inference/inference.py` + `api.py` — servir con los boosters de `Models/`
+   (contrato arriba) y rellenar las 5 columnas pred de `licitaciones.parquet`.
+2. `Dashboard/`.
 
 `requirements.txt` + venv propio + git (main, `Data/` ignorado) quedaron
 listos el 2026-09-02, antes de iniciar update.py.

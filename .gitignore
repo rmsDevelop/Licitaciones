@@ -1,6 +1,9 @@
 # datos (ZIPs cacheados, referencias descargadas, parquet) — no son código
 Data/
 
+# modelos entrenados y sus metas — artefactos, se regeneran con training.py
+Models/
+
 # python
 .venv/
 __pycache__/
