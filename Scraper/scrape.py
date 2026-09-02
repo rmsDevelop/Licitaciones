@@ -271,10 +271,14 @@ def descargar_archivo(session, url, filepath, max_reintentos=3):
     return None
 
 
-def descargar_conjunto(session, conjunto_id, ano_inicio, ano_fin, zip_dir, force=False):
-    """Descarga todos los ZIPs de un conjunto. Devuelve las rutas obtenidas."""
+def descargar_conjunto(session, conjunto_id, ano_inicio, ano_fin, zip_dir, force=False,
+                       archivos=None):
+    """Descarga los ZIPs de un conjunto. Devuelve las rutas obtenidas.
+    `archivos` restringe a una lista pre-filtrada de generar_urls_conjunto
+    (update.py: solo los ZIPs de la ventana)."""
     config = CONJUNTOS[conjunto_id]
-    archivos = generar_urls_conjunto(conjunto_id, ano_inicio, ano_fin)
+    if archivos is None:
+        archivos = generar_urls_conjunto(conjunto_id, ano_inicio, ano_fin)
     zip_dir.mkdir(parents=True, exist_ok=True)
 
     if force:

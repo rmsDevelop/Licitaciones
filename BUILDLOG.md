@@ -82,8 +82,10 @@ probado de `Licitaciones`, con sus fixes.
   ~9 GB) y `.venv/` están gitignored — solo entra código y documentación.
 - En disco: `Data/downloads/` ~8 GB de ZIPs (cache, re-utilizable),
   `Data/references/` ~490 MB, parquet 600 MB. ~9 GB en total.
-- El mensual del mes en curso aún no existe: PLACSP devuelve un
-  placeholder (se tolera; se re-descarga el próximo run).
+- El mensual del mes en curso aún no existe al principio de mes: PLACSP
+  devuelve un placeholder (se tolera). Ojo: el cache lo trata como
+  válido — scrape.py sin `--force` no lo refresca; `update.py` fuerza su
+  ventana y lo auto-cura.
 
 ### Duración del run completo (referencia)
 
@@ -92,13 +94,77 @@ Descarga ~8 GB ≈ 10 min (línea rápida, cacheable); parse licitaciones
 
 ---
 
+## 2026-09-02 — `Scraper/update.py`
+
+**Estado: HECHO.** Primer run real (`--meses 12`) contra `Data/` el
+2026-09-02: **3.630.925 filas × 70 columnas (628 MB)** — licitaciones
+867.893 (**212 nuevos**, 2.169 cambiados de 217.968 refrescados) +
+menores 2.763.032 (178 nuevos, 17 cambiados). Duración ~17 min
+(~2,3 GB re-descargados). Post-run verificado: 0 ids duplicados,
+esquema == `FINAL_SCHEMA`, nuevas con inferencia vacía. Los "nuevos" no
+son solo lo publicado hoy: el primer lote del ZIP de septiembre
+(publicado ese día, 10 MB con fechas 21-ago..1-sep) arrastra registros de
+última hora de agosto cuya primera aparición en la sindicación es ese
+lote.
+
+Qué hace: refresco incremental de `licitaciones.parquet` con los últimos
+X meses (`--meses`, default 12, alineado a mes natural: mes en curso +
+X-1 anteriores), reutilizando las primitivas de `scrape.py` (descarga
+atómica, parse streaming, calidad, esquema, escritura atómica).
+
+Pipeline: ventana → re-descarga **forzada** de los ZIPs cuyo periodo
+interseca (mensuales `YYYYMM >=` inicio; si la ventana nace antes de 2025,
+el anual del año de inicio) → parse+calidad solo de las filas de la
+ventana → merge contra el parquet existente → escritura atómica con el
+mismo `FINAL_SCHEMA`.
+
+Merge (3 reglas, portadas del sistema anterior `spts/inference/store.py`):
+id nuevo → fila completa con inferencia vacía; id conocido → raw (41) +
+calidad (22) frescos, `preds`/`ml_estado`/`version` se conservan; id
+ausente de la ventana → fila intacta. No clasifica (`Modeling/cleaning.py`)
+ni re-infiere (`Inference/`): las preds de una fila refrescada pueden
+quedar desfasadas hasta la próxima inferencia.
+
+### Decisiones consensuadas
+
+- Calidad de la ventana con cuantiles de la ventana: INT-FIA-01/09 (los
+  únicos dataset-relativos) se calculan contra los meses de la ventana, no
+  contra el histórico. Verificado con el run: drift de `score_calidad`
+  medio −0,02, solo 1.218/126.576 filas de ventana cambian de score.
+- Reutilización de descarga vía parámetro opcional `archivos=None` en
+  `descargar_conjunto` (scrape.py, backwards-compatible) en vez de
+  duplicar el loop.
+- Ventana por ZIP (periodo), no por `fecha_publicacion`: los ZIPs
+  contienen filas publicadas antes con actividad reciente — es como
+  entran las adjudicaciones tardías.
+- El placeholder del mes en curso (ZIP de ~0 MB) se tolera; como update
+  fuerza siempre su ventana, el cache se auto-cura el próximo run (con
+  scrape.py sin `--force` ese ZIP quedaría congelado hasta un force).
+
+### Verificación (smoke `--meses 3`, sandbox con parquet copiado)
+
+- Salida: 3.630.535 filas × 70 columnas, 0 ids duplicados, esquema ==
+  `FINAL_SCHEMA` (tipos incluidos). Recuentos por conjunto exactos.
+- Camino "ids nuevos" ejercitado quitando 1.000 ids de la ventana de la
+  tabla vieja: volvieron como nuevos, inferencia vacía, calidad presente,
+  recuento restaurado, sin duplicados.
+- Filas fuera de la ventana: intactas bit a bit en score (3.503.959).
+- `cambiados` compara `fecha_updated` (atom:updated) viejo vs nuevo: con
+  el scrape de ayer, 0 cambios (contenido idéntico un día después).
+
+### Operativa
+
+- Ejecutar: `.venv/bin/python -u Scraper/update.py [--meses 12] [--data-dir DIR]`
+- Coste ~17 min con `--meses 12` (~2,3 GB de mensuales re-descargados,
+  cache reutilizable). Requiere `licitaciones.parquet` previo.
+
+---
+
 ## Pendiente (orden propuesto, a consensuar)
 
-1. `Scraper/update.py` — refresco incremental de los últimos X meses
-   (reutiliza las primitivas de scrape.py; preserva `ml_estado`/preds).
-2. `Modeling/cleaning.py` — clasificar training/filtered (criterios de
+1. `Modeling/cleaning.py` — clasificar training/filtered (criterios de
    Licitaciones-Lab; aquí entra el recorte de población ≥2021 si procede).
-3. `Modeling/featurer.py` → `Modeling/training.py` → `Inference/` → `Dashboard/`.
+2. `Modeling/featurer.py` → `Modeling/training.py` → `Inference/` → `Dashboard/`.
 
 `requirements.txt` + venv propio + git (main, `Data/` ignorado) quedaron
 listos el 2026-09-02, antes de iniciar update.py.
