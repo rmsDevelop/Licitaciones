@@ -365,13 +365,15 @@ precision/recall al umbral del router + prevalencia · disc MAE · system MAE
 (gate). Registro JSON: modo, fecha, versión de modelo, umbrales, recuentos
 (test/evaluadas/excluidas), ventana de publicación.
 
-### Verificación (sandbox: 2.000 test simuladas = 1.600 válidas + 400
-### filtered + 100 control sin marcar)
+### Verificación
+
+Sandbox con estado post-update simulado: 2.000 filas marcadas 'test'
+(1.600 válidas + 400 filtered) + 100 control sin marcar.
 
 - Solo lee test (las 100 de control fuera); las 400 inválidas excluidas por
   el filtro de cleaning; 1.600 evaluadas.
-- curso sobrescribe `estado_curso.json`; prepromote aparea 2 líneas
-  parseables en `historico.jsonl`; dry-run no registra.
+- curso sobrescribe `estado_curso.json`; prepromote añade una línea por run
+  (2 runs → 2 líneas parseables en `historico.jsonl`); dry-run no registra.
 - El parquet queda intacto (md5 verificado): evaluate nunca escribe el
   almacén.
 - Métricas del smoke coherentes (muestras de train, in-sample orientativo):
