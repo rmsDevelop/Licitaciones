@@ -1,22 +1,19 @@
-#Entrena las seis lineas {licitaciones,menores} x {num_ofertas,zero_discount,
-#discount} en cadena y secuencial, con GPU cuando este disponible. HPs fijados
-#a los campeones de Licitaciones-Lab (recipes de los 05_training.py). Receta
-#de entrega (la del notebook 06 del Lab, adaptada a que aqui ya no hay TEST
-#porque la evaluacion previa ya ocurrio):
+#Elabora los seis modelos {licitaciones,menores} x {num_ofertas,zero_discount,
+#discount} de forma secuencial, con GPU cuando este disponible. HPs fijados a
+#los campeones de Licitaciones-Lab (recipes de los 05_training.py).
+#
+#Este archivo NO evalua (no hay test split: eso ocurrira en otra fase) ni
+#enruta (el gate zero_discount->0 lo decide quien sirva). Su unica salida son
+#los boosters Models/<linea>.ubj + Models/<linea>.meta.json. Receta:
 #   1. poblacion de la linea: filas train de features.parquet con el target
 #      valido (num_ofertas 0..50 o discount_pct 0..70 segun linea);
-#   2. split cronologico train/validation: VAL = ultimos 6 meses (la ventana
-#      de calibracion del contrato one-fit), TRAIN = el resto hasta 2021-01;
+#   2. split cronologico train/validation: VAL = ultimos 6 meses, solo como
+#      ventana de early-stopping para congelar los rounds (TRAIN = el resto);
 #   3. target encoding (solo lineas campeonas con TE): mapas fit en TRAIN;
-#   4. SONDA con early-stopping TRAIN vs VAL -> rounds congelados (+buffer 50)
-#      y metricas honestas de VAL (la sonda nunca vio VAL); para zero_discount
-#      tambien el umbral recall@precision>=floor;
-#   5. booster de produccion: refit con TODAS las filas de la linea y los
-#      rounds congelados (lo que servira Inference/);
-#   6. metricas de sistema (discount): gate duro (p_zero >= umbral -> 0) con
-#      las probs de VAL de la sonda zero_discount de su conjunto;
-#   7. Models/<linea>.ubj + Models/<linea>.meta.json (contrato de Inference/:
-#      features, niveles categoricos, mapas TE, umbral, transforms, clips).
+#   4. sonda con early-stopping TRAIN vs VAL -> rounds congelados (+buffer);
+#   5. booster de produccion: refit con TODAS las filas y rounds congelados;
+#   6. Models/<linea>.ubj + .meta.json (contrato de Inference/: features,
+#      niveles categoricos, mapas TE, transform y clip de la prediccion).
 
 from __future__ import annotations
 
@@ -29,11 +26,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import (
-    accuracy_score, average_precision_score, f1_score, log_loss,
-    mean_absolute_error, precision_recall_curve, precision_score, r2_score,
-    recall_score, roc_auc_score, root_mean_squared_error,
-)
 from xgboost import XGBClassifier, XGBRegressor
 
 import featurer
@@ -45,7 +37,7 @@ TE_COLS = ["organo_contratante", "dir3_organo", "ciudad_organo"]
 TE_ALPHA = 30.0
 EARLY_STOPPING = 50
 ROUNDS_BUFFER = 50
-VAL_MESES = 6                      # ventana de calibracion (contrato one-fit)
+VAL_MESES = 6                      # ventana de early-stopping
 
 HP_BASE = dict(subsample=0.8, colsample_bytree=0.8, min_child_weight=5.0,
                reg_lambda=1.0, tree_method="hist", enable_categorical=True,
@@ -58,8 +50,7 @@ LINEAS = [
          clip=(0.0, 50.0)),
     dict(linea="licitaciones/zero_discount", tipo="clf",
          objetivo="binary:logistic", eval_metric="aucpr",
-         spw="auto", max_depth=14, learning_rate=0.05, n_est_max=1000,
-         floor=0.80),
+         spw="auto", max_depth=14, learning_rate=0.05, n_est_max=1000),
     dict(linea="licitaciones/discount", tipo="reg",
          objetivo="reg:pseudohubererror", eval_metric="mae",
          te=False, max_depth=14, learning_rate=0.03, subsample=0.9,
@@ -70,8 +61,7 @@ LINEAS = [
          clip=(0.0, 50.0)),
     dict(linea="menores/zero_discount", tipo="clf",
          objetivo="binary:logistic", eval_metric="aucpr",
-         spw="none", max_depth=13, learning_rate=0.03, n_est_max=1000,
-         floor=0.95),
+         spw="none", max_depth=13, learning_rate=0.03, n_est_max=1000),
     dict(linea="menores/discount", tipo="reg",
          objetivo="reg:pseudohubererror", eval_metric="mae",
          te=True, max_depth=14, learning_rate=0.03, n_est_max=1500,
@@ -90,17 +80,6 @@ def resolver_spw(val: str, prevalencia: float) -> float:
     if v in ("none", "unweighted", "1", "1.0"):
         return 1.0
     return float(v)
-
-
-def elegir_umbral(y_true, p_prob, floor: float) -> float:
-    """Umbral que maximiza recall con precision >= floor (fallback F1-max)."""
-    prec, rec, thr = precision_recall_curve(y_true, p_prob)
-    prec, rec = prec[:-1], rec[:-1]
-    ok = prec >= floor
-    if ok.any():
-        return float(thr[ok][np.argmax(rec[ok])])
-    f1 = 2 * prec * rec / (prec + rec + 1e-12)
-    return float(thr[np.argmax(f1)])
 
 
 def add_target_encodings(X: pd.DataFrame, y: pd.Series, train_mask: np.ndarray,
@@ -129,10 +108,10 @@ def add_target_encodings(X: pd.DataFrame, y: pd.Series, train_mask: np.ndarray,
 def preparar_matrices(df: pd.DataFrame, linea: dict):
     """Poblacion de la linea + X/y + split cronologico + TE + casts.
 
-    Devuelve (X, y, ym, tr, val, ids_val, cat_levels, te_info). Indices
-    posicionales (reset) para alinear ids y probs entre lineas sin ambiguedad.
+    Devuelve (X, y, ym, tr, val, cat_levels, te_info). Indices
+    posicionales (reset).
     """
-    conjunto, target_name = linea["linea"].split("/")
+    target_name = linea["linea"].split("/")[1]
     target = featurer.TARGET_LINEA[target_name][0]
 
     if target_name == "num_ofertas":
@@ -168,8 +147,7 @@ def preparar_matrices(df: pd.DataFrame, linea: dict):
         elif str(X[c].dtype) != "category":
             X[c] = X[c].astype("float32")
 
-    ids_val = sub.loc[val, "id"].to_numpy()
-    return X, y, ym, tr, val, ids_val, cat_levels, te_info
+    return X, y, ym, tr, val, cat_levels, te_info
 
 
 def hacer_xgb(linea: dict, n_estimators: int, device: str,
@@ -193,65 +171,27 @@ def _target_y(y: pd.Series, transform: str | None):
     return np.log1p(arr) if transform == "log1p" else arr
 
 
-def metricas_reg(y_true, y_pred_raw, clip, transform=None, por_zeros=False) -> dict:
-    yt = np.asarray(y_true, dtype=float)
-    p = np.asarray(y_pred_raw, dtype=float)
-    if transform == "log1p":
-        p = np.expm1(p)
-    yp = np.clip(p, *clip)
-    out = {
-        "mae": round(float(mean_absolute_error(yt, yp)), 4),
-        "rmse": round(float(root_mean_squared_error(yt, yp)), 4),
-        "r2": round(float(r2_score(yt, yp)), 3),
-        "bias": round(float(np.mean(yp) - np.mean(yt)), 3),
-        "mean_pred": round(float(np.mean(yp)), 3),
-    }
-    if por_zeros:
-        zeros = yt == 0
-        out["mae_zero_rows"] = round(float(np.mean(np.abs(yt[zeros] - yp[zeros]))), 3) if zeros.any() else None
-        out["mae_positive_rows"] = round(float(np.mean(np.abs(yt[~zeros] - yp[~zeros]))), 3) if (~zeros).any() else None
-    return out
-
-
-def metricas_clf(y_true, p, umbral, floor) -> dict:
-    yt = np.asarray(y_true)
-    pred = (p >= umbral).astype(int)
-    return {
-        "auc_pr": round(float(average_precision_score(yt, p)), 3),
-        "auc_roc": round(float(roc_auc_score(yt, p)), 3),
-        "logloss": round(float(log_loss(yt, p, labels=[0, 1])), 3),
-        "precision": round(float(precision_score(yt, pred, zero_division=0)), 3),
-        "recall": round(float(recall_score(yt, pred, zero_division=0)), 3),
-        "f1": round(float(f1_score(yt, pred, zero_division=0)), 3),
-        "accuracy": round(float(accuracy_score(yt, pred)), 3),
-        "prevalence": round(float(np.mean(yt)), 3),
-        "umbral": round(float(umbral), 4),
-    }
-
-
 # ---------------------------------------------------------------------------
 # Una linea completa
 # ---------------------------------------------------------------------------
-def entrenar_linea(df: pd.DataFrame, linea: dict, models_dir: Path, device_pref: str,
-                   zd_val: dict | None) -> dict:
-    """Entrena una linea y guarda booster + meta. Devuelve el meta y, para las
-    lineas zero_discount, las probs de VAL por id (input del discount)."""
+def entrenar_linea(df: pd.DataFrame, linea: dict, models_dir: Path,
+                   device_pref: str) -> dict:
+    """Entrena una linea y guarda booster + meta. No evalua, no enruta."""
     t0 = time.time()
     nombre = linea["linea"]
     transform = linea.get("transform")
-    es_disc = nombre.endswith("/discount")
     print(f"\n=== {nombre} ===")
 
-    X, y, ym, tr, val, ids_val, cat_levels, te_info = preparar_matrices(df, linea)
+    X, y, ym, tr, val, cat_levels, te_info = preparar_matrices(df, linea)
     print(f"poblacion {len(X):,} | TRAIN {int(tr.sum()):,} | "
-          f"VAL {ym[val].min()}..{ym[val].max()} ({int(val.sum()):,}) | "
+          f"early-stop VAL {ym[val].min()}..{ym[val].max()} ({int(val.sum()):,}) | "
           f"features {X.shape[1]} ({len(cat_levels)} cat)")
 
     spw = None
     if linea["tipo"] == "clf":
         spw = resolver_spw(linea["spw"], float(y[tr].mean()))
 
-    # Sonda: early-stop TRAIN vs VAL -> rounds + metricas honestas + umbral.
+    # Sonda: early-stop TRAIN vs VAL -> rounds congelados.
     device = device_pref
     try:
         sonda = hacer_xgb(linea, linea["n_est_max"], device, spw, early=EARLY_STOPPING)
@@ -272,42 +212,9 @@ def entrenar_linea(df: pd.DataFrame, linea: dict, models_dir: Path, device_pref:
         else:
             sonda.fit(X[tr], y[tr].to_numpy(), eval_set=[(X[val], y[val].to_numpy())], verbose=False)
     rounds = int(sonda.best_iteration) + 1 + ROUNDS_BUFFER
-
-    umbral, metricas, p_val = None, {}, None
-    if linea["tipo"] == "clf":
-        p_val = sonda.predict_proba(X[val])[:, 1]
-        umbral = elegir_umbral(y[val].to_numpy(), p_val, linea["floor"])
-        metricas = metricas_clf(y[val].to_numpy(), p_val, umbral, linea["floor"])
-    else:
-        pred_val = sonda.predict(X[val])
-        metricas = metricas_reg(y[val].to_numpy(), pred_val, linea["clip"],
-                                transform, por_zeros=es_disc)
-        yt = y[val].to_numpy()
-        metricas["baseline_media"] = round(float(mean_absolute_error(yt, np.full(len(yt), y[tr].mean()))), 4)
-        metricas["baseline_mediana"] = round(float(mean_absolute_error(yt, np.full(len(yt), y[tr].median()))), 4)
-    print(f"sonda ({device}): rounds={rounds} | VAL: {metricas}")
-
-    # Sistema (discount): gate duro con las probs de la sonda zd, por id.
-    sistema = None
-    if es_disc:
-        if zd_val is None:
-            raise SystemExit(f"{nombre}: falta la salida de {linea['linea'].split('/')[0]}/zero_discount")
-        p_zero = zd_val["probs"].reindex(pd.Index(ids_val)).to_numpy()
-        if np.isnan(p_zero).any():
-            raise ValueError("las probs del router no cubren todos los ids de VAL")
-        pv = sonda.predict(X[val])
-        if transform == "log1p":
-            pv = np.expm1(pv)
-        pv = np.clip(pv, *linea["clip"])
-        gate = p_zero >= zd_val["umbral"]
-        hard = np.where(gate, 0.0, pv)
-        sistema = {
-            "system_hard_gate_mae": round(float(mean_absolute_error(y[val].to_numpy(), hard)), 4),
-            "router_flag_frac": round(float(gate.mean()), 4),
-            "umbral_router": round(float(zd_val["umbral"]), 4),
-        }
-        print(f"sistema (gate @ {sistema['umbral_router']}): "
-              f"MAE={sistema['system_hard_gate_mae']} (router marca {sistema['router_flag_frac']*100:.1f}%)")
+    del sonda
+    gc.collect()
+    print(f"rounds congelados: {rounds}")
 
     # Booster de produccion: refit con TODAS las filas y rounds congelados.
     produccion = hacer_xgb(linea, rounds, device, spw)
@@ -326,8 +233,6 @@ def entrenar_linea(df: pd.DataFrame, linea: dict, models_dir: Path, device_pref:
         "target": featurer.TARGET_LINEA[nombre.split("/")[1]][0],
         "transform": transform,
         "clip": list(linea["clip"]) if linea.get("clip") else None,
-        "umbral": round(float(umbral), 6) if umbral is not None else None,
-        "floor_precision": linea.get("floor"),
         "hp": {
             "objective": linea["objetivo"], "eval_metric": linea["eval_metric"],
             "max_depth": linea["max_depth"], "learning_rate": linea["learning_rate"],
@@ -339,14 +244,13 @@ def entrenar_linea(df: pd.DataFrame, linea: dict, models_dir: Path, device_pref:
             "n_estimators": rounds,
         },
         "rounds": rounds,
-        "val_meses": VAL_MESES,
+        "early_stop_val_meses": VAL_MESES,
+        "early_stop_val_window": [str(ym[val].min()), str(ym[val].max())],
         "sizes": {"train": int(tr.sum()), "val": int(val.sum()), "total": int(len(X))},
         "features": list(X.columns),
         "categorical_levels": cat_levels,
         "dtype_rule": "categoricas segun categorical_levels (NaN/nuevo -> missing); resto float32",
         "target_encoding": te_info,
-        "metricas_val_sonda": metricas,
-        "sistema": sistema,
         "device": device,
     }
     (models_dir / f"{stem}.meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
@@ -354,10 +258,7 @@ def entrenar_linea(df: pd.DataFrame, linea: dict, models_dir: Path, device_pref:
 
     del X
     gc.collect()
-    out = {"meta": meta}
-    if linea["tipo"] == "clf":
-        out["zd_val"] = {"probs": pd.Series(p_val, index=ids_val), "umbral": float(umbral)}
-    return out
+    return {"meta": meta}
 
 
 # ---------------------------------------------------------------------------
@@ -366,8 +267,6 @@ def entrenar_linea(df: pd.DataFrame, linea: dict, models_dir: Path, device_pref:
 def run(data_dir: Path, models_dir: Path, solo: str | None, device: str) -> None:
     feats_path = data_dir / "features.parquet"
     df_cache: dict[str, pd.DataFrame] = {}
-    zd_val: dict[str, dict] = {}
-    resumen = []
     for linea in LINEAS:
         if solo and solo not in linea["linea"]:
             continue
@@ -375,26 +274,14 @@ def run(data_dir: Path, models_dir: Path, solo: str | None, device: str) -> None
         if conjunto not in df_cache:
             print(f"cargando features de {conjunto} ...")
             df_cache[conjunto] = pd.read_parquet(feats_path, filters=[("conjunto", "=", conjunto)])
-        r = entrenar_linea(df_cache[conjunto], linea, models_dir, device,
-                           zd_val.get(conjunto))
-        resumen.append(r)
-        if "zd_val" in r:
-            zd_val[conjunto] = r["zd_val"]
+        entrenar_linea(df_cache[conjunto], linea, models_dir, device)
         if linea["linea"].endswith("/discount"):
-            zd_val.pop(conjunto, None)
             del df_cache[conjunto]
             gc.collect()
 
-    print("\n=== resumen (metricas honestas de VAL, sonda) ===")
-    for r in resumen:
-        m, met = r["meta"], r["meta"]["metricas_val_sonda"]
-        pr = f"MAE={met['mae']}" if "mae" in met else f"AUCpr={met['auc_pr']}"
-        sis = f" | sistema MAE={r['meta']['sistema']['system_hard_gate_mae']}" if r["meta"].get("sistema") else ""
-        print(f"{m['linea']:28s} {pr:16s} umbral={m['umbral']}{sis}")
-
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Entrenar las seis lineas (campeones del Lab).")
+    p = argparse.ArgumentParser(description="Elaborar los seis modelos (campeones del Lab).")
     p.add_argument("--data-dir", default="Data")
     p.add_argument("--models-dir", default="Models")
     p.add_argument("--solo", default=None, help="entrenar solo lineas que contengan este substring")

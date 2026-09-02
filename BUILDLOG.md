@@ -202,33 +202,35 @@ validez (VAL-01/04/05/14, FIA-11) caen por varianza cero en población limpia
 
 ### training.py
 
-6 entrenamientos secuenciales con GPU (GTX 1660 Ti, `device=cuda`, fallback
-CPU por línea). HPs = campeones del Lab: lic num **log1p+TE d13 lr.03** | lic
-zd **d14 lr.05 spw=auto floor P≥0.80** | lic disc **pseudohuber d14 lr.03
-sub.9** | men num **log1p+TE d13 lr.03** | men zd **d13 lr.03 spw=none floor
-P≥0.95** | men disc **pseudohuber+TE d14 lr.03**. TE = encodings suavizados
-(α=30) de órgano/dir3/ciudad fit en TRAIN, mapas guardados en el meta.
-Receta de entrega: población por objetivo → split cronológico VAL=últimos 6
-meses → **sonda** early-stop (TRAIN vs VAL) da rounds+buffer 50, métricas
-honestas de VAL y el umbral del router (recall@P≥floor) → **booster de
-producción** = refit con todas las filas y rounds congelados. Líneas discount
-además reportan el **MAE de sistema** (gate duro p_zero≥umbral→0) con las
-probs de la sonda zd de su conjunto, alineadas por id.
+**Elabora los 6 modelos — nada más.** No evalúa (no hay test split: la
+evaluación ocurrirá en otra fase) ni enruta (el gate zero_discount→0 lo
+decide quien sirva). 6 entrenamientos secuenciales con GPU (GTX 1660 Ti,
+`device=cuda`, fallback CPU por línea). HPs = campeones del Lab: lic num
+**log1p+TE d13 lr.03** | lic zd **d14 lr.05 spw=auto** | lic disc
+**pseudohuber d14 lr.03 sub.9** | men num **log1p+TE d13 lr.03** | men zd
+**d13 lr.03 spw=none** | men disc **pseudohuber+TE d14 lr.03**. TE =
+encodings suavizados (α=30) de órgano/dir3/ciudad fit en TRAIN, mapas
+guardados en el meta. Receta: población por objetivo → split cronológico
+(VAL = últimos 6 meses, **solo como ventana de early-stopping**) → sonda
+early-stop TRAIN vs VAL → rounds congelados (+buffer 50) → **booster de
+producción** = refit con todas las filas y rounds congelados → `Models/
+<linea>.ubj` + `.meta.json`. Las seis líneas son independientes entre sí.
 
-### Resultados (VAL honesto, sonda; referencia Lab entre paréntesis)
+### Verificación de la sesión
 
-| Línea | Métrica | Sistema |
-|---|---|---|
-| licitaciones/num_ofertas | MAE 1,077 (0,99) | — |
-| licitaciones/zero_discount | AUC-PR 0,911 (0,936), R@P0,80 0,855, umbral 0,405 | — |
-| licitaciones/discount | MAE 8,38 | **8,21** (6,78) |
-| menores/num_ofertas | MAE 0,286 (0,30) | — |
-| menores/zero_discount | AUC-PR 0,994, umbral 0,442 | — |
-| menores/discount | MAE 1,35 | **1,31** (1,42) |
-
-Menores al nivel del Lab; licitaciones algo por debajo (VENTANA distinta:
-6 meses vs su TEST de 3; bias −3 del regresor en meses recientes). Duración
-total del run: ~35 min.
+- cleaning: invariantes en sandbox (idempotencia, train⊆ventana, 0 train sin
+  objetivo válido, 0 abiertas con datos, esquema intacto, 0 ids duplicados).
+- featurer: sin columnas de fuga, spot-checks de valores contra el raw,
+  contrato FEATURES_LINEA validado al vuelo.
+- training: smoke con muestra al 5% (6 líneas, cadena completa) + run real
+  íntegro; test del contrato de servido cargando los 6 `.ubj` con sus metas
+  (TE por mapas, niveles congelados, transform/clip) — predicciones sanas.
+- Durante la sesión se midieron además, como comprobación puntual (código ya
+  retirado), métricas de VAL con la sonda: lic num MAE 1,08 · lic zd AUC-PR
+  0,911 · lic disc 8,38 · men num 0,29 · men zd 0,994 · men disc 1,35; y el
+  sistema con gate (umbral elegido en VAL): lic 8,21 (Lab 6,78) · men 1,31
+  (Lab 1,42). Referencias del Lab sobre ventanas TEST distintas — solo
+  orientativas. La evaluación formal y el enrutado pertenecen a otra fase.
 
 ### Contrato de Inference/ (verificado cargando los .ubj + meta)
 
@@ -238,10 +240,11 @@ total del run: ~35 min.
   niveles no vistos → enmascarar a NA antes (`s.where(s.isin(niveles))` — el
   constructor directo con valores fuera está deprecado en pandas y cambiará a
   error); el resto de columnas a float32.
-- Salida: num_ofertas → `expm1` + clip [0,50]; zero_discount → prob, pred =
-  prob ≥ `meta['umbral']`; discount → clip [0,70]; sistema → pred final =
-  0 si p_zero ≥ umbral. Servir en cadena num → zd → discount (discount puede
-  consumir `num_ofertas_pred` como feature serve-time).
+- Salida: num_ofertas → `expm1` + clip [0,50]; zero_discount → prob (la
+  comparación con el umbral y el gate del sistema los decide la fase de
+  evaluación/enrutado, no hay umbral en el meta); discount → clip [0,70].
+  Servir en cadena num → zd → discount (discount puede consumir
+  `num_ofertas_pred` como feature serve-time).
 
 ### Notas operativas
 
@@ -257,9 +260,11 @@ total del run: ~35 min.
 
 ## Pendiente (orden propuesto, a consensuar)
 
-1. `Inference/inference.py` + `api.py` — servir con los boosters de `Models/`
+1. Fase de **evaluación y enrutado** (test split, umbral del router, gate del
+   sistema) — se decide dónde vive (Inference/ o propia).
+2. `Inference/inference.py` + `api.py` — servir con los boosters de `Models/`
    (contrato arriba) y rellenar las 5 columnas pred de `licitaciones.parquet`.
-2. `Dashboard/`.
+3. `Dashboard/`.
 
 `requirements.txt` + venv propio + git (main, `Data/` ignorado) quedaron
 listos el 2026-09-02, antes de iniciar update.py.
