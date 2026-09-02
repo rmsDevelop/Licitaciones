@@ -258,12 +258,85 @@ producción** = refit con todas las filas y rounds congelados → `Models/
 
 ---
 
+## 2026-09-02 — `Inference/inference.py`
+
+**Estado: HECHO.** Servido a demanda verificado contra el camino de
+entrenamiento: **bit-exact** en filas con features idénticas.
+
+Qué hace: recibe un conjunto de licitaciones (esquema raw+INT de scrape.py,
+columna `conjunto`) y devuelve esas filas con las 5 preds + `version`
+rellenas. Función importable `inferir(df)` (la usará api.py) + CLI
+`--input archivo.parquet [--salida]`. No toca `ml_estado` (eso es de
+cleaning.py) ni escribe en `licitaciones.parquet`: quien llama decide qué
+filas manda. Receta: featurizar reutilizando `Modeling/featurer.py` (mismo
+código, sin copia) → hist_volume_* de la tabla train (`features.parquet`)
+reindexados → matriz por línea según el meta (TE por mapas, niveles
+congelados, resto float32) → num `expm1`+clip[0,50] · zd prob · disc
+clip[0,70] → router → version = max `meta['creado']` del set de 6.
+
+### Decisiones consensuadas
+
+- **A demanda**: no escanea el parquet buscando abiertas; el archivo recibe
+  el conjunto y lo sirve entero (sin filtro de población).
+- Función + CLI; la persistencia de preds en `licitaciones.parquet` es del
+  llamador (api.py / flujo operativo).
+- **Umbral del router** (la decisión "dónde vive" del pendiente): derivado
+  con los boosters de producción sobre la ventana VAL de features.parquet y
+  congelado como constante por conjunto en `inference.py` — lic 0,475
+  (MAE sistema 6,14→5,96; precision/recall zero 0,90/0,93) · men 0,585
+  (1,18→1,15; 0,98/0,98). Curva plana; algo optimista (VAL entra en el refit
+  de producción) — la evaluación formal es de evaluate.py.
+- hist_volume con base en la tabla train (réplica exacta del entrenamiento;
+  requiere `Data/` accesible).
+- row_missing_count de servido cuenta solo raw+calidad (objetivos
+  excluidos): en abiertas serían +2/3 NaN sistemáticos en toda fila.
+- version = max `meta['creado']`: identifica el modelo que predijo.
+
+### Detalles de fidelidad (salieron en la verificación)
+
+- `aplicar_hist` enmascara el bucket `"missing"` post-cast: en entrenamiento
+  el recuento era pre-cast (segmento NaN → hist NaN); sin máscara esas filas
+  recibirían el recuento de un bucket que no existía en train.
+- `INT-VAL-14` está a NaN en toda la parte licitaciones de features.parquet
+  (constante en población limpia → dropeada por conjunto; la union la
+  rellena de NaN). Las líneas de lic la entrenaron **inerte** (nanificarla
+  no cambia preds: verificado). En servido se alimenta el valor raw — lo
+  correcto de cara a reentrenamientos.
+- La métrica in-sample exige **filtrar** la población de descuento a [0,70],
+  no clipear: 110/500 cerradas de licitaciones quedan fuera de rango y con
+  clip inflaban el MAE de 6 a 11 (falso positivo mío, ya en el test).
+
+### Verificación
+
+- Estructura: dtypes float32×4 + int8 + version única; router consistente
+  (zd_pred == prob ≥ umbral; system = gate); ids/filas/ml_estado intactos;
+  preds sin NaN.
+- Equivalencia con la tabla train en 1.000 cerradas: features idénticas
+  salvo row_missing_count (±2, por diseño, filas con objetivos parcialmente
+  NaN en train) e INT-VAL-14 (inerte en lic). En filas 100% idénticas
+  (440 lic / 497 men) las preds son **bit-exact** (≤ 4e-7 = redondeo
+  float32 del expm1).
+- Determinismo bit a bit en repeticiones; MAE in-sample con población
+  filtrada: system 6,19 lic · 0,90 men (VAL: 5,96 · 1,15).
+- Smoke en `/tmp/smoke_inf/` (1.500 abiertas + 500 cerradas por conjunto);
+  código de verificación retirado.
+
+### Operativa
+
+- Ejecutar: `.venv/bin/python -u Inference/inference.py --input X.parquet
+  [--salida Y.parquet] [--models-dir Models] [--feats Data/features.parquet]`
+- Coste: ~14 s para 4k filas (dominado por carga de boosters + base hist).
+- Sin dependencias nuevas.
+
+---
+
 ## Pendiente (orden propuesto, a consensuar)
 
-1. Fase de **evaluación y enrutado** (test split, umbral del router, gate del
-   sistema) — se decide dónde vive (Inference/ o propia).
-2. `Inference/inference.py` + `api.py` — servir con los boosters de `Models/`
-   (contrato arriba) y rellenar las 5 columnas pred de `licitaciones.parquet`.
+1. `Inference/evaluate.py` — evaluación del sistema expuesto: población de
+   test (la pregunta del stub: ¿filtrar según cleaning.py?), registro JSON
+   para dashboard (en curso vs pre-promote).
+2. `api.py` + flujo operativo — servir y persistir preds en
+   `licitaciones.parquet` (el merge de preds es del llamador).
 3. `Dashboard/`.
 
 `requirements.txt` + venv propio + git (main, `Data/` ignorado) quedaron
