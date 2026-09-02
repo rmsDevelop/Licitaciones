@@ -330,14 +330,72 @@ clip[0,70] → router → version = max `meta['creado']` del set de 6.
 
 ---
 
+## 2026-09-02 — `Inference/evaluate.py` (+ protocolo del ciclo test)
+
+**Estado: HECHO.** Evaluación del sistema expuesto sobre las filas
+`ml_estado=='test'`, verificada en sandbox.
+
+### Protocolo consensuado del ciclo (la parte que tocaba a este archivo)
+
+- Estado estable tras reentrenar: train + filtered + abiertas, **ninguna
+  test**. Las test solo existen entre update y reentrenamiento.
+- `Scraper/update.py` (pendiente) marcará 'test' toda fila **recién
+  adjudicada que no pertenezca a train** — incluye refrescos que cierran
+  expedientes y filas nuevas que llegan ya adjudicadas.
+- evaluate.py re-infiere el conjunto test con `Models/` en cada evaluación
+  (ambos modos) vía `inferir()`; **no escribe preds en el parquet** (las
+  columnas pred son el registro de servido y esas filas no fueron servidas).
+- Validez: una fila test es evaluable si clasificaría como 'train' — se
+  reutiliza `cleaning.clasificar_estado` sin duplicar criterios. Las
+  inválidas quedan para que cleaning las reclasifique.
+- **Promoción**: `--modo prepromote` registra la evaluación de cierre del
+  modelo que va a ser reemplazado (la versión del registro es el
+  `max meta['creado']` vigente ANTES de reentrenar). Después:
+  cleaning (sin cambios — ya pliega test→train al recalcular) → featurer →
+  training. El modelo nuevo cierra su evaluación cuando le toque ser
+  reemplazado.
+- Registro en `<data-dir>/evaluaciones/` (cada host sus datos; gitignored):
+  `estado_curso.json` (modo curso, se sobreescribe — dashboard del modelo
+  expuesto) + `historico.jsonl` (modo prepromote, append — histórico).
+
+### Qué mide
+
+Por conjunto (y sobre la población válida por línea): num MAE · zd AUC-PR +
+precision/recall al umbral del router + prevalencia · disc MAE · system MAE
+(gate). Registro JSON: modo, fecha, versión de modelo, umbrales, recuentos
+(test/evaluadas/excluidas), ventana de publicación.
+
+### Verificación (sandbox: 2.000 test simuladas = 1.600 válidas + 400
+### filtered + 100 control sin marcar)
+
+- Solo lee test (las 100 de control fuera); las 400 inválidas excluidas por
+  el filtro de cleaning; 1.600 evaluadas.
+- curso sobrescribe `estado_curso.json`; prepromote aparea 2 líneas
+  parseables en `historico.jsonl`; dry-run no registra.
+- El parquet queda intacto (md5 verificado): evaluate nunca escribe el
+  almacén.
+- Métricas del smoke coherentes (muestras de train, in-sample orientativo):
+  lic num 0,78 · zd AUC-PR 0,97 · disc 6,66 · system 6,59 | men 0,18 ·
+  0,998 · 0,87 · 0,84. El gate mejora el disc en ambos conjuntos.
+
+### Operativa
+
+- Ejecutar: `.venv/bin/python -u Inference/evaluate.py [--modo
+  curso|prepromote] [--data-dir Data] [--models-dir Models] [--feats
+  Data/features.parquet] [--dry-run]`
+- Coste: el de un `inferir()` del conjunto test (~14 s para 1,6k filas).
+- Sin dependencias nuevas (sklearn ya estaba).
+
+---
+
 ## Pendiente (orden propuesto, a consensuar)
 
-1. `Inference/evaluate.py` — evaluación del sistema expuesto: población de
-   test (la pregunta del stub: ¿filtrar según cleaning.py?), registro JSON
-   para dashboard (en curso vs pre-promote).
+1. `Scraper/update.py` — marcar 'test' la adjudicación nueva (regla del
+   protocolo de arriba). Luego cleaning tal cual pliega test→train al
+   reentrenar.
 2. `api.py` + flujo operativo — servir y persistir preds en
    `licitaciones.parquet` (el merge de preds es del llamador).
-3. `Dashboard/`.
+3. `Dashboard/` (lee `Data/evaluaciones/`).
 
 `requirements.txt` + venv propio + git (main, `Data/` ignorado) quedaron
 listos el 2026-09-02, antes de iniciar update.py.
