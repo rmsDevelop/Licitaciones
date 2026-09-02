@@ -390,14 +390,42 @@ Sandbox con estado post-update simulado: 2.000 filas marcadas 'test'
 
 ---
 
+## 2026-09-02 — `Scraper/update.py`: marca de 'test'
+
+**Estado: HECHO** (camino positivo pendiente de transiciones reales).
+
+Qué hace: la regla del protocolo del ciclo de evaluación — en el merge, toda
+fila **recién adjudicada** que no sea train pasa a `ml_estado='test'`.
+"Recién adjudicada" = fila nueva que llega cumpliendo la condición, o id
+conocido que antes no la cumplía. La condición espeja la `cerrada` de
+cleaning.py: licitaciones `estado ∈ {Resuelta, Adjudicada}`; menores
+`num_ofertas` o `importe_adjudicacion` presentes. Las test existentes no se
+desmarcan; las train nunca se tocan; preds/version se siguen conservando.
+Stats del merge con contador propio (`test`).
+
+### Run real (2026-09-02, segundo update del día)
+
+0 nuevos · 0 cambiados · **0 marcadas test** en ambos conjuntos: el primer
+update del día (12:19) ya ingirió la novedad y PLACSP no movió nada en 4 h.
+Verificación contra pre-captura del estado: 3.630.925 filas, 0 ids
+duplicados, esquema == FINAL_SCHEMA, `ml_estado` idéntico en todos los ids,
+0 test. **El camino transición→marca quedó sin ejercitar por datos reales**
+(hoy no las hubo); se estrenará en el primer update con adjudicaciones
+nuevas.
+
+### Operativa
+
+- Sin cambios de uso: `.venv/bin/python -u Scraper/update.py [--meses N]`.
+
+---
+
 ## Pendiente (orden propuesto, a consensuar)
 
-1. `Scraper/update.py` — marcar 'test' la adjudicación nueva (regla del
-   protocolo de arriba). Luego cleaning tal cual pliega test→train al
-   reentrenar.
-2. `api.py` + flujo operativo — servir y persistir preds en
+1. `api.py` + flujo operativo — servir y persistir preds en
    `licitaciones.parquet` (el merge de preds es del llamador).
-3. `Dashboard/` (lee `Data/evaluaciones/`).
+2. `Dashboard/` (lee `Data/evaluaciones/`).
+3. Primer ciclo completo del protocolo cuando PLACSP traiga adjudicaciones
+   nuevas: update marca test → evaluate → cleaning pliega a train.
 
 `requirements.txt` + venv propio + git (main, `Data/` ignorado) quedaron
 listos el 2026-09-02, antes de iniciar update.py.

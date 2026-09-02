@@ -24,11 +24,17 @@ default 12), reutilizando las primitivas de scrape.py:
                  id conocido     raw (41) + calidad (22) FRESCOS; preds,
                                  ml_estado y version se conservan
                  id ausente      fila intacta
+               y una marca (protocolo del ciclo de evaluacion, ver
+               Inference/evaluate.py): toda fila recien adjudicada — nueva,
+               o refresco que cierra el expediente — que no sea train pasa a
+               ml_estado='test': es el conjunto de evaluacion del sistema
+               expuesto hasta el siguiente reentrenamiento.
   4. ESCRITURA atomica con el mismo FINAL_SCHEMA (escribir_parquet).
 
-No clasifica (ml_estado solo se preserva; la clasificacion es de
-Modeling/cleaning.py) ni re-infiere preds (Inference/): las preds de una
-fila refrescada pueden quedar desfasadas hasta la proxima inferencia.
+Mas alla de la marca 'test', no clasifica (la clasificacion plena es de
+Modeling/cleaning.py, que pliega las test a train al reentrenar) ni
+re-infiere preds (Inference/): las preds de una fila refrescada pueden
+quedar desfasadas hasta la proxima inferencia.
 
 Uso:
     python Scraper/update.py                  # ultimos 12 meses
@@ -82,6 +88,18 @@ def archivos_ventana(conjunto_id, meses):
 # MERGE
 # ============================================================================
 
+ESTADOS_ADJUDICADOS = ["Resuelta", "Adjudicada"]  # espejo de cleaning.AWARD_STATES
+
+
+def es_adjudicada(df, conjunto_id):
+    """Condicion de expediente con objetivo disponible (espejo de la
+    'cerrada' de Modeling/cleaning.py: licitaciones por estado, menores por
+    recuento o importe de adjudicacion)."""
+    if conjunto_id == "licitaciones":
+        return df["estado"].isin(ESTADOS_ADJUDICADOS).fillna(False).to_numpy(dtype=bool)
+    return (df["num_ofertas"].notna() | df["importe_adjudicacion"].notna()).to_numpy(dtype=bool)
+
+
 def actualizar_conjunto(conjunto_id, zip_paths, tabla_vieja, borme, ted):
     """Parse + calidad de la ventana y merge con las filas previas del
     conjunto (las tres reglas). Devuelve (tabla final, estadisticas o None
@@ -108,11 +126,24 @@ def actualizar_conjunto(conjunto_id, zip_paths, tabla_vieja, borme, ted):
     en_ambos = df["id"].isin(ids_viejos)
 
     # de los refrescados, cuantos cambiaron de verdad (atom:updated)
-    f_vieja = (tabla_vieja.select(["id", "fecha_updated"]).to_pandas()
-               .set_index("id")["fecha_updated"])
-    v = f_vieja.reindex(df.loc[en_ambos, "id"]).reset_index(drop=True)
+    cols_adj = (["estado"] if conjunto_id == "licitaciones"
+                else ["num_ofertas", "importe_adjudicacion"])
+    viejo = (tabla_vieja.select(["id", "fecha_updated"] + cols_adj).to_pandas()
+             .set_index("id"))
+    v = viejo["fecha_updated"].reindex(df.loc[en_ambos, "id"]).reset_index(drop=True)
     n = df.loc[en_ambos, "fecha_updated"].reset_index(drop=True)
     cambio = ~((v == n) | (v.isna() & n.isna()))
+
+    # Marca de test (protocolo del ciclo de evaluacion): recien adjudicada —
+    # fila nueva, o conocida que antes no cumplia — que no sea train. El
+    # resto de estados se preserva tal cual (las test existentes no se
+    # desmarcan; cleaning las pliega a train al reentrenar).
+    adj_ahora = es_adjudicada(df, conjunto_id)
+    adj_antes = pd.Series(es_adjudicada(viejo, conjunto_id), index=viejo.index)
+    recien = adj_ahora & ~adj_antes.reindex(df["id"]).fillna(False).to_numpy(dtype=bool)
+    no_train = (df[scrape.ESTADO_COL] != "train").fillna(True).to_numpy(dtype=bool)
+    marcar = recien & no_train
+    df.loc[marcar, scrape.ESTADO_COL] = "test"
 
     tabla_nueva = pa.Table.from_pandas(df[scrape.FINAL_SCHEMA.names],
                                        schema=scrape.FINAL_SCHEMA,
@@ -128,7 +159,8 @@ def actualizar_conjunto(conjunto_id, zip_paths, tabla_vieja, borme, ted):
     tabla_final = pa.concat_tables([tabla_kept, tabla_nueva.cast(tabla_kept.schema)])
 
     stats = {"nuevos": int((~en_ambos).sum()), "refrescados": int(en_ambos.sum()),
-             "cambiados": int(cambio.sum()), "filas": len(tabla_final)}
+             "cambiados": int(cambio.sum()), "test": int(marcar.sum()),
+             "filas": len(tabla_final)}
     return tabla_final, stats
 
 # ============================================================================
@@ -194,6 +226,7 @@ def main():
             print(f"[merge] {conjunto_id}: {stats['nuevos']:,} nuevos | "
                   f"{stats['refrescados']:,} refrescados "
                   f"({stats['cambiados']:,} cambiaron) | "
+                  f"{stats['test']:,} marcadas test | "
                   f"{stats['filas']:,} filas")
 
     if not tablas:
