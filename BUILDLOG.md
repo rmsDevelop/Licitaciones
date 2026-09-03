@@ -419,13 +419,102 @@ nuevas.
 
 ---
 
+## 2026-09-02 — `api.py` + `Dashboard/dashboard.html`
+
+**Estado: HECHO.** API de operación y dashboard portados de
+`../Licitaciones/spts/{api,dashboard}.py|html` y adaptados al rework:
+4 paneles (Datos · Laboratorio · Histórico · Modelo expuesto), verificados
+en vivo contra `Data/` y `Models/` reales.
+
+### `api.py` (raíz)
+
+FastAPI localhost por diseño, sin registry de boosters (el servido a
+demanda es el diseño de Inference/inference.py: carga y descarga por
+llamada) y sin config files (constantes en el archivo):
+
+- `GET /` — sirve `Dashboard/dashboard.html` (un solo fichero, sin build).
+- `GET /status` — universo por conjunto (train/test/filtered/abiertas/
+  servidas), versión expuesta, op en marcha, cola de runs. Para el poll
+  de 10 s del dashboard.
+- `GET /datos` — análisis del parquet: KPIs, universo, filas por año de
+  publicación (pre-2021 en un bucket `<2021`), calidad media, preds por
+  versión. **Cacheado por (mtime, tamaño)**: releer los 600 MB solo
+  cuando update.py reescribe el almacén.
+- `GET /modelos` — metas de las 6 líneas (nunca los boosters): receta HP,
+  rounds, tamaños, features+TE, ventana early-stop, MB del .ubj; versión
+  expuesta = `inference.version_modelos` y umbrales del router leídos de
+  `inference.py` (sin duplicar constantes).
+- `GET /evaluaciones` — `estado_curso.json` (curso, se sobreescribe) +
+  `historico.jsonl` (cierres prepromote) de `Data/evaluaciones/`, todo
+  en una respuesta (los docs son pequeños).
+- `POST /ops/evaluar[?modo]` — subprocess single-flight de
+  `evaluate.py` (default curso); logs en `Data/ops/logs/`, una línea por
+  run en `Data/ops/runs.jsonl`, estado en memoria del proceso.
+- `POST /inferir` — EL producto: upload parquet raw (+`conjunto`) →
+  passthrough completo con las 5 preds + version (`inferir()`); tope
+  256 MB; headers `X-Modelo-Version`/`X-Filas`/`X-Caveat`.
+
+### `Dashboard/dashboard.html`
+
+Mismo sistema visual del viejo (CSS, tabs con deep-link `#hash`, tiles
+KPI, tablas, SVG inline, dark mode, tooltips nativos), etiquetas en
+español. Los 4 paneles:
+
+1. **Datos** — análisis del parquet: KPIs (filas, conjuntos, test pool,
+   servidas, modificado), barras apiladas por ciclo de vida + tabla
+   gemela, barras por año de publicación por conjunto + tabla gemela,
+   preds por versión si existen.
+2. **Laboratorio** — vacío por ahora; destinado a información de
+   `../Licitaciones-Lab`.
+3. **Histórico** — cierres prepromote de modelos ya reemplazados:
+   select de versión, KPIs por conjunto (system/num/zd/disc) y tendencia
+   del system MAE entre versiones (línea con ≥2 puntos).
+4. **Modelo expuesto** — KPIs (versión, edad, umbrales router, pool),
+   tablas por conjunto de las 3 líneas con su receta, evaluación en
+   curso (`estado_curso.json`), botón «Evaluar ahora» y runs recientes.
+
+Ciclo de refresco: `/status` cada 10 s; `/datos` `/modelos`
+`/evaluaciones` al cargar y al terminar un op; estados vacíos con
+instrucciones cuando aún no hay evaluaciones.
+
+### Verificación
+
+- Endpoints en vivo (uvicorn 127.0.0.1): `/status` `/datos` `/modelos`
+  `/evaluaciones` `/` con datos reales (3.630.925 filas; 6 metas;
+  evaluaciones vacías — el ciclo aún no ha producido).
+- `POST /ops/evaluar` end-to-end: subprocess rc 0 («sin filas test»,
+  lo esperado hoy), `runs.jsonl` con la línea del run, estado limpio;
+  single-flight 409 con doble POST; `?modo=bogus` 400.
+- `POST /inferir` smoke: 80 abiertas (40+40) → +6 columnas, preds sin
+  NaN, gate consistente (system=0 ⇔ zd_pred), versión única; 422 con
+  basura, 409 sin `conjunto`.
+- Dashboard: sintaxis JS (node) + cross-check de IDs + **smoke DOM en
+  node** con stub mínimo y datos reales + evaluaciones sintéticas
+  (esquema de evaluate.py): ejercita los 4 paneles, select histórico,
+  tendencia con 2 puntos y los caminos vacíos. El smoke cazó y corrigió
+  una carrera real (los KPIs del expuesto se pintaban antes de
+  `/modelos` con los umbrales a "—": ahora `cargarModelos` re-renderiza).
+- Los gráficos portan el sistema visual validado del viejo (misma paleta
+  por conjunto); tooltips nativos `title` en barras y puntos.
+
+### Operativa
+
+- Levantar: `.venv/bin/uvicorn api:app --port 8000` (desde la raíz) →
+  dashboard en `http://127.0.0.1:8000/` (deep-links `#lab #historico
+  #expuesto`).
+- `Data/ops/` (runs + logs) es gitignored con el resto de `Data/`.
+- requirements: añadidos fastapi 0.141.1, uvicorn 0.52.4,
+  python-multipart 0.0.32.
+
+---
+
 ## Pendiente (orden propuesto, a consensuar)
 
-1. `api.py` + flujo operativo — servir y persistir preds en
-   `licitaciones.parquet` (el merge de preds es del llamador).
-2. `Dashboard/` (lee `Data/evaluaciones/`).
+1. Flujo operativo de preds — persistir lo servido en
+   `licitaciones.parquet` (el merge de preds que el BUILDLOG de
+   inference.py deja al llamador: qué filas se sirven, cuándo y con qué
+   versión) + opcionalmente el botón de ciclo completo en la API.
+2. Panel Laboratorio — poblarlo con información de
+   `../Licitaciones-Lab` cuando haya algo que recoger.
 3. Primer ciclo completo del protocolo cuando PLACSP traiga adjudicaciones
    nuevas: update marca test → evaluate → cleaning pliega a train.
-
-`requirements.txt` + venv propio + git (main, `Data/` ignorado) quedaron
-listos el 2026-09-02, antes de iniciar update.py.

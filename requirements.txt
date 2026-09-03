@@ -1,8 +1,7 @@
-# Nuevo_Licitaciones — runtime de Scraper/ + Modeling/
+# Nuevo_Licitaciones — runtime de Scraper/ + Modeling/ + Inference/ + api.py
 # Recrear:  uv venv .venv --python 3.12 && uv pip install -r requirements.txt
-# Versiones pinadas al runtime probado (scrape 2026-09-01; training 2026-09-02).
-# Las dependencias de fases posteriores (fastapi en api.py) se añadirán cuando
-# esos ficheros existan.
+# Versiones pinadas al runtime probado (scrape 2026-09-01; training 2026-09-02;
+# api+dashboard 2026-09-02).
 
 pandas==3.0.3
 numpy==2.5.1
@@ -11,3 +10,6 @@ requests==2.34.2
 xgboost==3.4.1
 scikit-learn==1.9.0
 scipy==1.18.1
+fastapi==0.141.1
+uvicorn==0.52.4
+python-multipart==0.0.32
