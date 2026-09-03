@@ -16,16 +16,22 @@
 #                        (nunca los boosters)
 #  GET  /evaluaciones    estado_curso.json (modelo expuesto) + historico.jsonl
 #                        (modelos ya reemplazados)
-#  POST /ops/evaluar     lanza Inference/evaluate.py en subprocess (un solo
-#                        op a la vez); ?modo=curso|prepromote
+#  POST /ops/{op}        lanza un op en subprocess (un solo op a la vez):
+#                        evaluar | update | cleaning | featurer | training |
+#                        ciclo (protocolo completo encadenado). ?modo=curso|
+#                        prepromote (evaluar) · ?meses (update y ciclo)
+#  GET  /ops/log/{op}/{id}  ultimas lineas del log de un run (visor)
 #  POST /inferir         EL producto: parquet raw (+columna 'conjunto') ->
 #                        mismo parquet con las 5 preds + version (inferir()
 #                        de Inference/inference.py, passthrough completo)
 #
 #Los ops corren como SUBPROCESOS con log en Data/ops/logs/ y una linea por
-#run en Data/ops/runs.jsonl (gitignored como todo Data/). Lock single-flight:
-#un op a la vez; el estado en marcha vive en memoria del proceso (si la API
+#PASO en Data/ops/runs.jsonl (gitignored como todo Data/); los pasos de un
+#ciclo llevan el campo "ciclo" con el id del grupo. Lock single-flight: un
+#op a la vez; el estado en marcha vive en memoria del proceso (si la API
 #muere con un op lanzado, el subprocess sigue y su log queda en disco).
+#El ciclo para al primer paso con rc!=0 — y evaluar con 0 filas test es un
+#no-op limpio (rc 0 sin registrar), asi que el ciclo sigue su curso.
 #
 #Contrato de servicio: LOCALHOST POR DISENO — exposicion, auth y TLS belong
 #al sistema que se ponga delante.
@@ -34,6 +40,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -59,6 +66,20 @@ CONJUNTOS = ("licitaciones", "menores")
 LINEAS = ("num_ofertas", "zero_discount", "discount")
 MAX_SUBIDA_BYTES = 2**28  # 256 MB: el parquet de un upload de servido
 OPS_DIR = DATA_DIR / "ops"
+
+# Ops expuestos como subprocess (script; flags fijos + los del query). scrape
+# queda fuera (reconstruir el almacen entero es cosa de terminal, no de la
+# consola); servir es POST /inferir, no un op.
+OPS = {
+    "evaluar":  "Inference/evaluate.py",
+    "update":   "Scraper/update.py",
+    "cleaning": "Modeling/cleaning.py",
+    "featurer": "Modeling/featurer.py",
+    "training": "Modeling/training.py",
+}
+# El protocolo de reentrenamiento completo, en orden: evaluar (prepromote)
+# cierra el modelo que va a ser reemplazado; cleaning pliega las test a train.
+CICLO = ("update", "evaluar", "cleaning", "featurer", "training")
 
 _AGG_CACHE: dict = {}   # agregados del parquet (firma: mtime+tamano)
 _META_CACHE: dict = {}  # version expuesta (firma: mtimes de los 6 metas)
@@ -137,9 +158,6 @@ def _agregados() -> dict:
     return _cache((st.st_mtime_ns, st.st_size), _AGG_CACHE, calc)
 
 
-_META_CACHE: dict = {}
-
-
 def _version_expuesta() -> str:
     """max(meta['creado']) de las 6 lineas (inference.version_modelos),
     cacheado por mtime de los metas: no reparsear ~6 MB de JSON cada poll."""
@@ -167,43 +185,82 @@ def _rec_linea(stem: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Ops en subprocess (single-flight)
+# Ops en subprocess (single-flight): un op = 1..N pasos encadenados
 # ---------------------------------------------------------------------------
 _OPS_LOCK = threading.Lock()
-_OPS_STATE: dict = {"op": None, "run_id": None, "started": None, "rc": None, "log": None}
+_OPS_STATE: dict = {"op": None, "run_id": None, "started": None, "rc": None,
+                    "log": None, "log_run_id": None, "paso": None, "pasos": []}
 
 
-def _start_op(op: str, cmd: list[str]) -> dict:
-    """Lanza el subprocess del op bajo el lock; no bloqueante."""
+def _pasos_de(op: str, modo: str, meses: int) -> list[tuple[str, list[str]]]:
+    """(nombre_paso, cmd) por paso del op. Puro, para poder testearlo."""
+    pasos: list[tuple[str, list[str]]] = []
+    for nombre in (CICLO if op == "ciclo" else (op,)):
+        flags: list[str] = []
+        if nombre == "evaluar":
+            # en el ciclo siempre prepromote: cierra el modelo reemplazado
+            flags += ["--modo", "prepromote" if op == "ciclo" else modo]
+        if nombre == "update":
+            flags += ["--meses", str(meses)]
+        pasos.append((nombre, [sys.executable, "-u", OPS[nombre], *flags]))
+    return pasos
+
+
+def _start_op(op: str, pasos: list[tuple[str, list[str]]]) -> dict:
+    """Lanza la cadena de pasos en un hilo watcher; no bloqueante."""
     with _OPS_LOCK:
         if _OPS_STATE["op"] is not None:
             raise HTTPException(409, f"ya hay un op en marcha: {_OPS_STATE['op']}")
         run_id = time.strftime("%Y%m%d_%H%M%S")
-        started = _ahora()
-        log = OPS_DIR / "logs" / f"{op}_{run_id}.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        _OPS_STATE.update(op=op, run_id=run_id, started=started, rc=None, log=str(log))
+        _OPS_STATE.update(op=op, run_id=run_id, started=_ahora(), rc=None,
+                          log=None, log_run_id=None, paso=None,
+                          pasos=[{"paso": n, "status": "pendiente"} for n, _ in pasos])
 
-    proc = subprocess.Popen(cmd, stdout=open(log, "ab"), stderr=subprocess.STDOUT,
-                            cwd=ROOT)
-
-    def _watch():
-        rc = proc.wait()
-        with _OPS_LOCK:
-            rec = {"op": op, "run_id": run_id, "triggered": "api",
-                   "started": _OPS_STATE["started"], "finished": _ahora(),
+    def _watch() -> None:
+        rc = 0
+        for nombre, cmd in pasos:
+            # paso suelto: el run_id del op; paso de ciclo: el suyo propio
+            # (los agrupa el campo "ciclo" en runs.jsonl)
+            paso_rid = run_id if len(pasos) == 1 else time.strftime("%Y%m%d_%H%M%S")
+            log = OPS_DIR / "logs" / f"{nombre}_{paso_rid}.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with _OPS_LOCK:
+                _OPS_STATE.update(paso=nombre, log=str(log), log_run_id=paso_rid)
+                for p in _OPS_STATE["pasos"]:
+                    if p["paso"] == nombre:
+                        p["status"] = "en_marcha"
+            started = _ahora()
+            with open(log, "ab") as lf:
+                rc = subprocess.call(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=ROOT)
+            rec = {"op": nombre, "run_id": paso_rid, "triggered": "api",
+                   "started": started, "finished": _ahora(),
                    "status": "ok" if rc == 0 else "failed", "rc": rc}
+            if len(pasos) > 1:
+                rec["ciclo"] = run_id
             with open(OPS_DIR / "runs.jsonl", "a") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            _OPS_STATE.update(op=None, rc=rc)
+            with _OPS_LOCK:
+                for p in _OPS_STATE["pasos"]:
+                    if p["paso"] == nombre:
+                        p["status"] = rec["status"]
+            if rc != 0:
+                break
+        with _OPS_LOCK:
+            _OPS_STATE.update(op=None, rc=rc, paso=None)
 
     threading.Thread(target=_watch, daemon=True).start()
-    return {"op": op, "run_id": run_id, "log": str(log), "cmd": " ".join(cmd)}
+    if len(pasos) == 1:
+        log = OPS_DIR / "logs" / f"{op}_{run_id}.log"
+        return {"op": op, "run_id": run_id, "log": str(log),
+                "cmd": " ".join(pasos[0][1])}
+    return {"op": op, "run_id": run_id, "pasos": [n for n, _ in pasos]}
 
 
 def _ops_estado() -> dict:
     with _OPS_LOCK:
-        return dict(_OPS_STATE)
+        e = dict(_OPS_STATE)
+        e["pasos"] = [dict(p) for p in _OPS_STATE["pasos"]]
+        return e
 
 
 def _runs_tail(n: int = 12) -> list[dict]:
@@ -266,18 +323,42 @@ def evaluaciones() -> dict:
     return {"curso": curso, "historico": historico}
 
 
-@app.post("/ops/evaluar")
-def ops_evaluar(modo: str = "curso"):
-    """Evaluar el sistema expuesto sobre las filas test ahora mismo.
+@app.post("/ops/{op}")
+def lanzar_op(op: str, modo: str = "curso", meses: int = 12):
+    """Lanza un op en subprocess (single-flight): evaluar | update | cleaning |
+    featurer | training | ciclo.
 
-    curso (default): refresca el estado_curso.json del dashboard. prepromote:
-    la evaluacion de cierre del modelo que va a ser reemplazado — pertenece
-    al protocolo de reentrenamiento, se expone por simetria con el CLI.
+    ciclo encadena el protocolo completo (update -> evaluar prepromote ->
+    cleaning -> featurer -> training) y para al primer paso fallido; cada paso
+    deja su linea en runs.jsonl y su log. Query: modo (solo evaluar suelto:
+    curso|prepromote) · meses (update y ciclo).
     """
+    if op not in OPS and op != "ciclo":
+        raise HTTPException(404, f"op desconocido: {op} "
+                                 f"(disponibles: {', '.join((*OPS, 'ciclo'))})")
     if modo not in ("curso", "prepromote"):
         raise HTTPException(400, "modo debe ser curso|prepromote")
-    cmd = [sys.executable, "-u", "Inference/evaluate.py", "--modo", modo]
-    return _start_op("evaluar", cmd)
+    if meses < 1:
+        raise HTTPException(400, "meses debe ser >= 1")
+    return _start_op(op, _pasos_de(op, modo, meses))
+
+
+@app.get("/ops/log/{op}/{run_id}")
+def ver_log(op: str, run_id: str, cola: int = 120):
+    """Ultimas lineas del log de un run — el visor del dashboard.
+
+    El nombre del log es {op}_{run_id}.log (exacto, sin glob: dos pasos de
+    un ciclo pueden caer en el mismo segundo y compartir run_id).
+    """
+    if not re.fullmatch(r"[a-z_]+", op):
+        raise HTTPException(400, "op invalida")
+    if not re.fullmatch(r"\d{8}_\d{6}", run_id):
+        raise HTTPException(400, "run_id invalido")
+    log = OPS_DIR / "logs" / f"{op}_{run_id}.log"
+    if not log.exists():
+        raise HTTPException(404, f"sin log para {op} {run_id}")
+    return {"op": op, "run_id": run_id, "log": str(log),
+            "lineas": log.read_text(errors="replace").splitlines()[-cola:]}
 
 
 @app.post("/inferir")

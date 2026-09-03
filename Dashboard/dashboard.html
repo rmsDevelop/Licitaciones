@@ -104,6 +104,32 @@
   .op-note { font-size: 12px; color: var(--muted); margin-top: 8px; min-height: 16px; }
   .op-note.err { color: var(--critical); }
   .op-note.ok { color: var(--good); }
+  .op-row label { font-size: 12px; color: var(--text-secondary); }
+  .op-row input {
+    width: 60px; background: var(--surface-1); border: 1px solid var(--ring);
+    border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 13px;
+    color: var(--text-primary);
+  }
+  button.action.secundo { background: var(--surface-1); color: var(--text-primary);
+                          border: 1px solid var(--ring); }
+  button.action.secundo:hover { background: var(--surface-1); border-color: var(--accent); }
+
+  /* tira de estado del op en marcha (pasos del ciclo) */
+  .pasos-strip { background: var(--surface-1); border: 1px solid var(--ring);
+                 border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-top: 12px; }
+  .pasos-strip .sub { color: var(--muted); font-size: 11px; margin-left: 8px; }
+  .pasos { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+  .paso-sep { color: var(--muted); font-size: 11px; }
+  .paso-chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--ring);
+               border-radius: 999px; padding: 2px 10px; font-size: 12px;
+               color: var(--text-secondary); }
+  .paso-chip.done { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+  .paso-chip.run { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 50%, transparent); }
+  .paso-chip.fail { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 50%, transparent); }
+
+  .log-pre { background: var(--surface-1); border: 1px solid var(--ring); border-radius: 8px;
+             padding: 10px 12px; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+             overflow: auto; max-height: 280px; white-space: pre-wrap; margin: 8px 0 0; }
 
   .status-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
   .status-badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; }
@@ -228,15 +254,41 @@
         </div>
         <div class="op-note" id="evaluar-note">re-infiere el conjunto test con Models/ y refresca estado_curso.json (modo curso).</div>
       </div>
+      <div class="op-card">
+        <h3>Ciclo completo</h3>
+        <div class="op-row">
+          <label for="ciclo-meses">meses de update</label>
+          <input type="number" id="ciclo-meses" min="1" max="60" value="12">
+          <button class="action" id="ciclo-btn" onclick="runCiclo()">Lanzar ciclo</button>
+        </div>
+        <div class="op-note" id="ciclo-note">update → evaluar prepromote (cierra el modelo actual) → cleaning → featurer → training. Para al primer paso fallido.</div>
+      </div>
+      <div class="op-card">
+        <h3>Pasos sueltos</h3>
+        <div class="op-row">
+          <label for="update-meses">meses</label>
+          <input type="number" id="update-meses" min="1" max="60" value="12">
+          <button class="action secundo" onclick="runUpdate()">Update</button>
+          <button class="action secundo" onclick="runOp('cleaning')">Cleaning</button>
+          <button class="action secundo" onclick="runOp('featurer')">Featurer</button>
+          <button class="action secundo" onclick="runOp('training')">Training</button>
+        </div>
+        <div class="op-note" id="ops-note">los pasos del ciclo por separado con sus defaults (update usa los meses de al lado).</div>
+      </div>
     </div>
+    <div id="op-status"></div>
   </section>
   <div style="height:8px"></div>
   <section>
     <h2>Runs recientes</h2>
     <table id="runs-table">
-      <thead><tr><th>Op</th><th>Estado</th><th>Inicio</th><th>Fin</th><th class="num">rc</th></tr></thead>
+      <thead><tr><th>Op</th><th>Estado</th><th>Inicio</th><th>Fin</th><th class="num">rc</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
+    <div id="run-log" hidden>
+      <div class="op-note" id="run-log-title"></div>
+      <pre class="log-pre" id="run-log-lines"></pre>
+    </div>
   </section>
 </section>
 
@@ -244,8 +296,9 @@
   Evaluación = el sistema expuesto re-inferido sobre las filas ml_estado='test' (cerradas
   nunca vistas por el entrenamiento), filtradas por los criterios de cleaning — las preds
   nunca se persisten en esas filas. curso = estado del modelo expuesto (se sobreescribe);
-  prepromote = cierre del modelo que va a ser reemplazado (histórico). Ciclo:
-  update.py marca test → evaluate → cleaning las pliega a train → featurer → training.
+  prepromote = cierre del modelo que va a ser reemplazado (histórico). Ciclo (botón
+  «Lanzar ciclo»): update marca test → evaluate cierra el expuesto → cleaning pliega a
+  train → featurer → training. Todo op corre como subprocess con log en Data/ops/.
 </footer>
 
 <script>
@@ -274,7 +327,7 @@ addEventListener("hashchange", () => {
 }
 
 // ----------------------------------------------------------- estado compartido
-let OCUPADO = false, STATUS = null, MODELOS = null, EVAL = null;
+let OCUPADO = false, STATUS = null, MODELOS = null, EVAL = null, LOG_ABIERTO = null, LOG_OP = null;
 
 async function refresh() {
   // cada 10 s: status (barato — agregados cacheados en la API)
@@ -287,6 +340,9 @@ async function refresh() {
     renderRuns(s.runs_tail || [], s.ops || {});
     document.getElementById("updated").textContent =
       "actualizado " + new Date().toLocaleTimeString();
+    // log abierto del paso en marcha: refrescarlo con el poll
+    const caja = document.getElementById("run-log");
+    if (LOG_ABIERTO && s.ops?.log_run_id === LOG_ABIERTO && !caja.hidden) cargarLog(LOG_OP, LOG_ABIERTO);
     // al terminar un op: recargar lo que el op escribe (evaluaciones, datos)
     if (OCUPADO && !s.ops.op) { cargarDatos(); cargarEvaluaciones(); }
     OCUPADO = !!s.ops.op;
@@ -570,12 +626,28 @@ function renderCurso() {
 // ------------------------------------------------------------------- ops
 function markOps(ops) {
   const busy = !!ops.op;
-  document.getElementById("evaluar-btn").disabled = busy;
-  if (ops.op === "evaluar") {
-    const note = document.getElementById("evaluar-note");
-    note.className = "op-note";
-    note.textContent = `en marcha (${ops.run_id}) — poll de /status; log: ${ops.log}`;
-  }
+  document.querySelectorAll("button.action").forEach(b => { b.disabled = busy; });
+  renderOpStatus(ops);
+}
+
+// tira de estado del op en marcha: chips de pasos cuando es un ciclo
+function renderOpStatus(ops) {
+  const el = document.getElementById("op-status");
+  if (!ops.op) { el.innerHTML = ""; return; }
+  const pasos = ops.pasos || [];
+  const chips = pasos.length > 1 ? `<div class="pasos">${pasos.map(p => {
+    const cls = p.status === "ok" ? "done" : p.status === "en_marcha" ? "run"
+              : p.status === "failed" ? "fail" : "";
+    const marca = p.status === "ok" ? "✓" : p.status === "en_marcha" ? "●"
+                : p.status === "failed" ? "✗" : "·";
+    return `<span class="paso-chip ${cls}">${marca} ${esc(p.paso)}</span>`;
+  }).join('<span class="paso-sep">→</span>')}</div>` : "";
+  el.innerHTML = `<div class="pasos-strip"><b>${esc(ops.op)}</b> en marcha` +
+    (ops.log ? `<span class="sub">${esc(ops.log)}</span>` : "") + chips + `</div>`;
+}
+
+function botLog(op, runId) {
+  return `<button class="tbl-toggle" onclick="verLog('${esc(op)}','${esc(runId)}')">log</button>`;
 }
 
 function renderRuns(tail, ops) {
@@ -584,31 +656,74 @@ function renderRuns(tail, ops) {
     rows.push(`<tr><td>${esc(ops.op)}</td>
       <td><span class="status-badge running">running</span></td>
       <td>${esc((ops.started || "").replace("T", " ").slice(0, 19))}</td>
-      <td class="sub">—</td><td class="num">—</td></tr>`);
+      <td class="sub">—</td><td class="num">—</td>
+      <td>${ops.log_run_id ? botLog(ops.paso || ops.op, ops.log_run_id) : ""}</td></tr>`);
   }
   for (const r of tail.slice(0, 10)) {
-    rows.push(`<tr><td>${esc(r.op)}</td>
+    const ciclo = r.ciclo ? ` <span class="sub" title="paso del ciclo ${esc(r.ciclo)}">⤷</span>` : "";
+    rows.push(`<tr><td>${esc(r.op)}${ciclo}</td>
       <td><span class="status-badge ${esc(r.status)}">${esc(r.status)}</span></td>
       <td>${esc((r.started || "").replace("T", " ").slice(0, 19))}</td>
       <td>${esc((r.finished || "").replace("T", " ").slice(0, 19))}</td>
-      <td class="num">${r.rc ?? "—"}</td></tr>`);
+      <td class="num">${r.rc ?? "—"}</td>
+      <td>${r.run_id ? botLog(r.op, r.run_id) : ""}</td></tr>`);
   }
   document.querySelector("#runs-table tbody").innerHTML = rows.join("");
 }
 
-async function runEvaluar() {
-  const note = document.getElementById("evaluar-note");
+// lanzamiento de ops: un POST /ops/{op} por boton, feedback en la nota de su tarjeta
+async function runOp(op, query) {
+  const note = document.getElementById(
+    op === "evaluar" ? "evaluar-note" : op === "ciclo" ? "ciclo-note" : "ops-note");
   note.className = "op-note"; note.textContent = "lanzando…";
   try {
-    const r = await fetch("/ops/evaluar", {method: "POST"});
+    const r = await fetch("/ops/" + op + (query ? "?" + query : ""), {method: "POST"});
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || r.statusText);
     note.className = "op-note ok";
-    note.textContent = `lanzado ${j.run_id} — mira Runs recientes / ${j.log}`;
+    note.textContent = `lanzado ${j.run_id}` +
+      (j.pasos ? ` — pasos: ${j.pasos.join(" → ")}` : "") + " — progreso en Runs recientes";
   } catch (e) {
     note.className = "op-note err"; note.textContent = String(e.message || e);
   }
   setTimeout(refresh, 1500);
+}
+
+function runEvaluar() { runOp("evaluar"); }
+
+function runCiclo() {
+  const m = parseInt(document.getElementById("ciclo-meses").value, 10);
+  runOp("ciclo", isNaN(m) ? "" : "meses=" + m);
+}
+
+function runUpdate() {
+  const m = parseInt(document.getElementById("update-meses").value, 10);
+  runOp("update", isNaN(m) ? "" : "meses=" + m);
+}
+
+// visor del log de un run (GET /ops/log/{op}/{id}); el del paso en marcha
+// se refresca solo con el poll de /status
+async function cargarLog(op, runId) {
+  const titulo = document.getElementById("run-log-title");
+  try {
+    const r = await fetch(`/ops/log/${encodeURIComponent(op)}/${encodeURIComponent(runId)}?cola=120`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || r.statusText);
+    titulo.textContent = `${j.log} — últimas ${j.lineas.length} líneas`;
+    document.getElementById("run-log-lines").textContent = j.lineas.join("\n") || "(log vacío)";
+  } catch (e) {
+    titulo.textContent = `log ${op} ${runId} — ` + (e.message || e);
+  }
+}
+
+async function verLog(op, runId) {
+  const box = document.getElementById("run-log");
+  if (LOG_ABIERTO === runId && LOG_OP === op && !box.hidden) {
+    box.hidden = true; LOG_ABIERTO = null; return;
+  }
+  LOG_ABIERTO = runId; LOG_OP = op; box.hidden = false;
+  document.getElementById("run-log-title").textContent = `log ${op} ${runId} — cargando…`;
+  cargarLog(op, runId);
 }
 
 // ------------------------------------------------------------------ gráficos

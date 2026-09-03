@@ -508,13 +508,111 @@ instrucciones cuando aún no hay evaluaciones.
 
 ---
 
+## 2026-09-03 — `api.py` + `Dashboard/`: la API como única puerta de operación
+
+**Estado: HECHO.** Se barajó un CLI y se descartó: el single-flight de la
+API solo cubre lo que pasa por ella — con una sola puerta, la limitación
+"dos update.py a la vez" se disuelve en vez de documentarse; lo scriptable
+queda cubierto con `curl -X POST localhost:8000/ops/{op}`. Todo el trabajo
+es ampliar el `/ops` y el dashboard para gestionar el pipeline entero.
+
+### `api.py`
+
+- `POST /ops/{op}` — evaluar | update | cleaning | featurer | training |
+  **ciclo**. Single-flight como antes; query `modo` (evaluar suelto:
+  curso|prepromote) y `meses` (update y ciclo). scrape queda fuera
+  (reconstruir el almacén entero es cosa de terminal); servir sigue siendo
+  `POST /inferir`.
+- **`ciclo`** — la cadena del protocolo de reentrenamiento: update →
+  evaluar prepromote (cierra el modelo que va a ser reemplazado) →
+  cleaning (pliega las test a train) → featurer → training. Cada paso es
+  su subprocess con su log y su línea en runs.jsonl (campo `ciclo` con el
+  id del grupo); **para al primer rc≠0**. Con 0 filas test, evaluar es
+  no-op limpio (rc 0 sin registrar) y el ciclo sigue su curso.
+- `GET /ops/log/{op}/{run_id}` — últimas N líneas del log de un run (el
+  visor del dashboard). Nombre exacto `{op}_{run_id}.log`, **sin glob**:
+  dos pasos de un ciclo pueden caer en el mismo segundo y compartir
+  run_id (lo cazó el smoke). `op`/`run_id` validados por regex.
+- `/status` extiende el estado del op con `paso`/`pasos` (progreso del
+  ciclo) y `log_run_id` (el run cuyo log está vivo ahora).
+- Implementación: `_start_op(op, pasos)` con la lista de pasos
+  construida por `_pasos_de` (función pura, testeable); el watcher corre
+  `subprocess.call` secuencial y actualiza estado/registro por paso.
+- Limpieza menor: `_META_CACHE` estaba definido dos veces.
+
+### `Dashboard/dashboard.html`
+
+- Tarjeta **«Ciclo completo»** (input de meses + botón) y tarjeta
+  **«Pasos sueltos»** (update/cleaning/featurer/training con sus
+  defaults) junto a la de «Evaluar ahora»; todos los botones se
+  deshabilitan con un op en marcha.
+- **Tira de estado** del op en marcha con chips de pasos (✓ ok · ● en
+  marcha · ✗ fallido · · pendiente) cuando es un ciclo.
+- **Runs recientes**: los pasos de ciclo llevan marca ⤷ (tooltip con el
+  id del grupo) y cada fila tiene botón **log**.
+- **Visor de log** bajo la tabla: abre/cierra por fila y el del paso en
+  marcha se auto-refresca con el poll de 10 s.
+
+### Verificación
+
+- Cadena con stubs (sandbox `/tmp` para no tocar `Data/ops/` real):
+  `_pasos_de` construye bien (prepromote forzado en el ciclo, `--meses`
+  solo en update); 2 pasos ok → fallo rc 3 → el paso posterior **no
+  corre**; runs.jsonl agrupa por campo `ciclo`; un log por paso; el op
+  suelto comparte run_id entre respuesta/estado/registro; el visor
+  resuelve el log correcto incluso con colisión de segundo; sanitizadores
+  devuelven 400/404 con entradas maliciosas.
+- HTTP en vivo (uvicorn): `POST /ops/evaluar` real rc 0 («sin filas
+  test», lo esperado hoy); 409 con doble POST; 404 op desconocido; 400
+  modo/meses/run_id; visor del run recién creado.
+- Dashboard: `node --check` del script + smoke DOM con stubs (eval
+  indirecto para replicar el scope global del navegador): chips del
+  ciclo, marca ⤷ y botones de log, visor abre/pinta/cierra, feedback
+  ok/err del lanzamiento, cross-check de IDs y handlers.
+
+### Primer ciclo real (mismo día, estreno del protocolo)
+
+Un `POST /ops/update?meses=2` encontró novedades (PLACSP movió): 170+144
+nuevas, **614 marcadas test** — el pool de evaluación se estrenó. Un
+`POST /ops/evaluar` (curso) registró la primera `estado_curso.json`, y a
+continuación el **primer ciclo completo por la API** (31,5 min):
+
+| paso | duración | resultado |
+|---|---|---|
+| update | 3:17 | 0/0/0 — nada nuevo en los 15 min previos |
+| evaluar prepromote | 0:21 | **primer cierre en `historico.jsonl`**: v2026-09-02 sobre las 614 test (606 eval), números idénticos al curso previo (determinismo) |
+| cleaning | 0:11 | pliegue: lic +458 train (12 a filtered), men +144, test→0; totales por conjunto intactos |
+| featurer | 1:27 | `features.parquet` regenerado con el train nuevo |
+| training | 26:25 | 6 líneas (rounds 991/346/786/1459/392/233) |
+
+- Nueva versión expuesta: **2026-09-03T12:16:31Z**; los 5 runs del ciclo
+  quedaron agrupados por el campo `ciclo` en `runs.jsonl`.
+- Smoke de servido post-ciclo (`POST /inferir`, 100 abiertas): versión
+  nueva en headers, 5 preds sanas, gate consistente (`system==0 ⇔
+  zd==1 | disc==0`).
+- Cierre honesto del modelo 2026-09-02 (sus números sobre las 614): lic
+  system MAE 10,53 · num 1,36 · zd AUC-PR 0,693 · disc 10,52 | men 3,71
+  · 0,58 · 0,954 · 3,72. Peor que las referencias VAL (optimistas por
+  diseño: entraban en el refit) y con n=606 — primera línea base real;
+  el panel Histórico empezará la tendencia con este punto.
+- **Nota de protocolo**: tras un ciclo, `estado_curso.json` conserva la
+  evaluación del modelo reemplazado hasta que acumulen nuevas test y se
+  lance un curso — el panel lo hace legible mostrando la versión
+  evaluada dentro del propio documento.
+
+### Operativa
+
+- Sin cambios de arranque ni dependencias nuevas:
+  `.venv/bin/uvicorn api:app --port 8000` → dashboard en `/`.
+- Cron-able: `curl -s -X POST 'http://127.0.0.1:8000/ops/update?meses=3'`.
+
+---
+
 ## Pendiente (orden propuesto, a consensuar)
 
 1. Flujo operativo de preds — persistir lo servido en
    `licitaciones.parquet` (el merge de preds que el BUILDLOG de
    inference.py deja al llamador: qué filas se sirven, cuándo y con qué
-   versión) + opcionalmente el botón de ciclo completo en la API.
+   versión).
 2. Panel Laboratorio — poblarlo con información de
    `../Licitaciones-Lab` cuando haya algo que recoger.
-3. Primer ciclo completo del protocolo cuando PLACSP traiga adjudicaciones
-   nuevas: update marca test → evaluate → cleaning pliega a train.
