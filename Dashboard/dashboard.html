@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nuevo Licitaciones — operación</title>
+<style>
+  :root {
+    --page: #f9f9f7; --surface-1: #fcfcfb;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --baseline: #c3c2b7;
+    --series-1: #2a78d6;               /* licitaciones (categorical slot 1) */
+    --series-2: #eda100;               /* menores (categorical slot 3) */
+    --accent: #2a78d6; --accent-deep: #1c5cab;
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --ring: rgba(11,11,11,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d; --surface-1: #1a1a19;
+      --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --baseline: #383835;
+      --series-1: #3987e5; --series-2: #c98500;
+      --accent: #3987e5; --accent-deep: #5598e7;
+      --ring: rgba(255,255,255,0.10);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--text-primary);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px clamp(16px, 4vw, 48px) 64px;
+  }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { color: var(--text-secondary); font-size: 13px; }
+  .version-chips { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip {
+    background: var(--surface-1); border: 1px solid var(--ring); border-radius: 999px;
+    padding: 3px 12px; font-size: 12px; color: var(--text-secondary);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+  .chip b { color: var(--text-primary); font-weight: 600; }
+
+  nav.panels { display: flex; gap: 4px; margin: 14px 0 18px; flex-wrap: wrap; }
+  nav.panels button {
+    background: none; border: 1px solid transparent; border-radius: 8px;
+    color: var(--text-secondary); font: inherit; font-size: 13px; font-weight: 600;
+    padding: 7px 14px; cursor: pointer;
+  }
+  nav.panels button[aria-selected="true"] {
+    background: var(--surface-1); border-color: var(--ring); color: var(--text-primary);
+  }
+  section[hidden] { display: none; }
+  section { margin-bottom: 28px; }
+  h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+       color: var(--muted); margin: 0 0 10px; }
+  .panel-intro { color: var(--text-secondary); font-size: 13px; margin: -4px 0 14px; max-width: 78ch; }
+
+  .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .tile {
+    background: var(--surface-1); border: 1px solid var(--ring); border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .tile .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
+  .tile .value { font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+  .tile .delta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--surface-1);
+          border: 1px solid var(--ring); border-radius: 10px; overflow: hidden; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+       color: var(--muted); font-weight: 600; padding: 8px 12px; border-bottom: 1px solid var(--grid); }
+  td { padding: 7px 12px; border-bottom: 1px solid var(--grid); font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td .sub { color: var(--muted); font-size: 11px; }
+
+  /* figure cards (charts) */
+  figure.card {
+    margin: 0; background: var(--surface-1); border: 1px solid var(--ring);
+    border-radius: 10px; padding: 14px 16px 10px;
+  }
+  figure.card figcaption { font-size: 12px; color: var(--text-secondary); margin: 2px 0 8px; }
+  figure.card figcaption b { color: var(--text-primary); font-size: 13px; }
+  .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .tbl-toggle {
+    background: none; border: none; color: var(--accent); font-size: 12px;
+    cursor: pointer; padding: 2px 4px; margin-top: 6px;
+  }
+  .tbl-toggle:hover { text-decoration: underline; }
+
+  .ops { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+  .op-card { background: var(--surface-1); border: 1px solid var(--ring); border-radius: 10px;
+             padding: 14px 16px; min-width: 280px; flex: 1; }
+  .op-card h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+  .op-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button.action {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    padding: 6px 16px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  button.action:hover { background: var(--accent-deep); }
+  button.action:disabled { opacity: 0.5; cursor: wait; }
+  .op-note { font-size: 12px; color: var(--muted); margin-top: 8px; min-height: 16px; }
+  .op-note.err { color: var(--critical); }
+  .op-note.ok { color: var(--good); }
+
+  .status-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
+  .status-badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; }
+  .status-badge.ok::before { background: var(--good); }
+  .status-badge.failed::before { background: var(--critical); }
+  .status-badge.running::before { background: var(--warning); }
+
+  .vacio { color: var(--muted); font-size: 13px; background: var(--surface-1);
+           border: 1px dashed var(--baseline); border-radius: 10px; padding: 18px 20px;
+           max-width: 78ch; }
+
+  footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
+  a { color: var(--accent); }
+  .loading { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Nuevo Licitaciones — operación</h1>
+  <span class="subtitle" id="updated">cargando…</span>
+  <div class="version-chips" id="chips"></div>
+</header>
+
+<nav class="panels" role="tablist" aria-label="paneles del dashboard">
+  <button role="tab" id="tab-datos" aria-controls="panel-datos" aria-selected="true" onclick="showPanel('datos')">Datos</button>
+  <button role="tab" id="tab-lab" aria-controls="panel-lab" aria-selected="false" onclick="showPanel('lab')">Laboratorio</button>
+  <button role="tab" id="tab-historico" aria-controls="panel-historico" aria-selected="false" onclick="showPanel('historico')">Histórico</button>
+  <button role="tab" id="tab-expuesto" aria-controls="panel-expuesto" aria-selected="false" onclick="showPanel('expuesto')">Modelo expuesto</button>
+</nav>
+
+<!-- ========================= PANEL 1: DATOS ========================= -->
+<section id="panel-datos" role="tabpanel" aria-labelledby="tab-datos">
+  <p class="panel-intro">
+    Análisis del parquet en memoria (<code>Data/licitaciones.parquet</code>): universo por
+    ciclo de vida, actividad por año de publicación y calidad. Los agregados los calcula la
+    API leyendo el almacén y los cachea por mtime — el poll de 10 s no relee los 600 MB.
+  </p>
+  <div class="kpi-row" id="datos-kpis"><span class="loading">cargando datos…</span></div>
+  <div style="height:14px"></div>
+  <div class="chart-grid">
+    <figure class="card" id="universo-card">
+      <figcaption><b>Universo por ciclo de vida</b> — filas por conjunto</figcaption>
+      <div id="universo-chart"></div>
+      <button class="tbl-toggle" onclick="toggleTable('universo-table')">vista tabla</button>
+    </figure>
+    <figure class="card" id="anos-card-licitaciones">
+      <figcaption><b>Filas por año de publicación</b> — licitaciones</figcaption>
+      <div id="anos-chart-licitaciones"></div>
+      <button class="tbl-toggle" onclick="toggleTable('anos-table-licitaciones')">vista tabla</button>
+    </figure>
+    <figure class="card" id="anos-card-menores">
+      <figcaption><b>Filas por año de publicación</b> — menores</figcaption>
+      <div id="anos-chart-menores"></div>
+      <button class="tbl-toggle" onclick="toggleTable('anos-table-menores')">vista tabla</button>
+    </figure>
+  </div>
+  <table id="universo-table" hidden>
+    <thead><tr>
+      <th>Conjunto</th><th class="num">Train</th><th class="num">Test</th>
+      <th class="num">Filtered</th><th class="num">Abiertas</th>
+      <th class="num">Servidas</th><th class="num">Calidad media</th><th class="num">Total</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <table id="anos-table-licitaciones" hidden>
+    <thead><tr><th>Año de publicación</th><th class="num">Filas</th></tr></thead><tbody></tbody>
+  </table>
+  <table id="anos-table-menores" hidden>
+    <thead><tr><th>Año de publicación</th><th class="num">Filas</th></tr></thead><tbody></tbody>
+  </table>
+  <div style="height:8px"></div>
+  <div id="versiones-pred"></div>
+</section>
+
+<!-- ======================= PANEL 2: LABORATORIO ======================= -->
+<section id="panel-lab" role="tabpanel" aria-labelledby="tab-lab" hidden>
+  <p class="panel-intro">
+    Destinado a recoger la información de <code>../Licitaciones-Lab</code> — el laboratorio
+    congelado donde se desarrollaron las features y los hiperparámetros campeones que
+    <code>Modeling/featurer.py</code> unifica para este rework.
+  </p>
+  <div class="vacio">Vacío por ahora — se poblará cuando el Lab aporte información que mostrar.</div>
+</section>
+
+<!-- ======================= PANEL 3: HISTÓRICO ======================= -->
+<section id="panel-historico" role="tabpanel" aria-labelledby="tab-historico" hidden>
+  <p class="panel-intro">
+    Evaluaciones de cierre (<code>evaluate.py --modo prepromote</code>) de los modelos
+    anteriores al expuesto: cada uno re-inferido sobre las filas test que acumuló antes de
+    ser reemplazado. Una línea por versión en <code>Data/evaluaciones/historico.jsonl</code>.
+  </p>
+  <div class="op-row" style="margin-bottom:12px">
+    <label for="hist-select" style="font-size:12px;color:var(--text-secondary)">versión evaluada</label>
+    <select id="hist-select" onchange="loadHistDoc(this.value)"></select>
+  </div>
+  <div id="hist-body"><span class="loading">cargando histórico…</span></div>
+  <div id="hist-trend"></div>
+</section>
+
+<!-- ===================== PANEL 4: MODELO EXPUESTO ===================== -->
+<section id="panel-expuesto" role="tabpanel" aria-labelledby="tab-expuesto" hidden>
+  <p class="panel-intro">
+    Qué está expuesto ahora mismo en <code>Models/</code> (las 6 líneas: identidad y receta
+    de entrenamiento de sus metas) y su evaluación en curso — el sistema re-inferido sobre
+    las filas <code>ml_estado='test'</code> que <code>update.py</code> va marcando.
+  </p>
+  <div class="kpi-row" id="expuesto-kpis"><span class="loading">cargando modelos…</span></div>
+  <div style="height:14px"></div>
+  <div id="expuesto-lineas"></div>
+  <div style="height:8px"></div>
+  <section>
+    <h2>Evaluación en curso</h2>
+    <div id="curso-body"><span class="loading">cargando evaluación…</span></div>
+  </section>
+  <section>
+    <h2>Operaciones</h2>
+    <div class="ops">
+      <div class="op-card">
+        <h3>Evaluar el expuesto ahora</h3>
+        <div class="op-row">
+          <button class="action" id="evaluar-btn" onclick="runEvaluar()">Evaluar ahora</button>
+        </div>
+        <div class="op-note" id="evaluar-note">re-infiere el conjunto test con Models/ y refresca estado_curso.json (modo curso).</div>
+      </div>
+    </div>
+  </section>
+  <div style="height:8px"></div>
+  <section>
+    <h2>Runs recientes</h2>
+    <table id="runs-table">
+      <thead><tr><th>Op</th><th>Estado</th><th>Inicio</th><th>Fin</th><th class="num">rc</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</section>
+
+<footer>
+  Evaluación = el sistema expuesto re-inferido sobre las filas ml_estado='test' (cerradas
+  nunca vistas por el entrenamiento), filtradas por los criterios de cleaning — las preds
+  nunca se persisten en esas filas. curso = estado del modelo expuesto (se sobreescribe);
+  prepromote = cierre del modelo que va a ser reemplazado (histórico). Ciclo:
+  update.py marca test → evaluate → cleaning las pliega a train → featurer → training.
+</footer>
+
+<script>
+const DS_COLORS = {licitaciones: "var(--series-1)", menores: "var(--series-2)"};
+const fmt = n => n == null ? "—" :
+  Math.abs(n) >= 1e6 ? (n/1e6).toFixed(1) + "M" :
+  Math.abs(n) >= 1e3 ? (n/1e3).toFixed(1) + "K" : String(n);
+const esc = s => { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; };
+
+// ------------------------------------------------------------------ paneles
+function showPanel(name) {
+  for (const p of ["datos", "lab", "historico", "expuesto"]) {
+    document.getElementById("panel-" + p).hidden = p !== name;
+    document.getElementById("tab-" + p).setAttribute("aria-selected", p === name);
+  }
+}
+
+// deep link: #datos/#lab/#historico/#expuesto abre ese panel
+addEventListener("hashchange", () => {
+  const h = location.hash.replace("#", "");
+  if (["datos", "lab", "historico", "expuesto"].includes(h)) showPanel(h);
+});
+{
+  const h = location.hash.replace("#", "");
+  if (["datos", "lab", "historico", "expuesto"].includes(h) && h !== "datos") showPanel(h);
+}
+
+// ----------------------------------------------------------- estado compartido
+let OCUPADO = false, STATUS = null, MODELOS = null, EVAL = null;
+
+async function refresh() {
+  // cada 10 s: status (barato — agregados cacheados en la API)
+  try {
+    const s = await (await fetch("/status")).json();
+    STATUS = s;
+    renderChips(s);
+    renderExpuestoKpis(s);
+    markOps(s.ops || {});
+    renderRuns(s.runs_tail || [], s.ops || {});
+    document.getElementById("updated").textContent =
+      "actualizado " + new Date().toLocaleTimeString();
+    // al terminar un op: recargar lo que el op escribe (evaluaciones, datos)
+    if (OCUPADO && !s.ops.op) { cargarDatos(); cargarEvaluaciones(); }
+    OCUPADO = !!s.ops.op;
+  } catch (e) {
+    document.getElementById("updated").textContent = "status no disponible: " + e;
+  }
+}
+
+async function cargarDatos() {
+  try { renderDatos(await (await fetch("/datos")).json()); } catch (e) {}
+}
+async function cargarModelos() {
+  try {
+    MODELOS = await (await fetch("/modelos")).json();
+    renderModelos(MODELOS);
+    // los KPIs del expuesto mezclan /status y /modelos: re-render al llegar
+    // los modelos (refresh pudo pintarlos antes con los umbrales a "—")
+    if (STATUS) renderExpuestoKpis(STATUS);
+  } catch (e) {}
+}
+async function cargarEvaluaciones() {
+  try { EVAL = await (await fetch("/evaluaciones")).json(); renderCurso(); renderHistorico(); } catch (e) {}
+}
+
+// ---------------------------------------------------------------- chips cabecera
+function renderChips(s) {
+  const el = document.getElementById("chips");
+  el.innerHTML = "";
+  const c1 = document.createElement("span");
+  c1.className = "chip";
+  c1.innerHTML = `<span class="dot"></span>modelo <b>v${esc((s.version || "?").slice(0, 16))}</b>`;
+  c1.title = s.version || "";
+  el.appendChild(c1);
+  const u = s.universo || {};
+  const test = (u.licitaciones?.test || 0) + (u.menores?.test || 0);
+  const c2 = document.createElement("span");
+  c2.className = "chip";
+  c2.innerHTML = `test <b>${fmt(test)}</b> filas`;
+  c2.title = "pool de evaluación pendiente (ml_estado='test')";
+  el.appendChild(c2);
+}
+
+// ================================================================ PANEL 1: DATOS
+function renderDatos(d) {
+  const cs = d.conjuntos || {};
+  const tot = c => cs[c] ? cs[c].train + cs[c].test + cs[c].filtered + cs[c].abiertas : 0;
+  const servidas = (cs.licitaciones?.servidas || 0) + (cs.menores?.servidas || 0);
+  const test = (cs.licitaciones?.test || 0) + (cs.menores?.test || 0);
+  document.getElementById("datos-kpis").innerHTML = [
+    {label: "filas totales", value: fmt(d.filas), delta: `${d.columnas} columnas · ${d.mb} MB`},
+    {label: "licitaciones", value: fmt(tot("licitaciones")), delta: `calidad media ${cs.licitaciones?.calidad_media ?? "—"}`},
+    {label: "menores", value: fmt(tot("menores")), delta: `calidad media ${cs.menores?.calidad_media ?? "—"}`},
+    {label: "test (pool evaluación)", value: fmt(test), delta: "cerradas nuevas sin plegar a train"},
+    {label: "servidas (preds)", value: fmt(servidas), delta: Object.keys(d.versiones_pred || {}).length
+        ? Object.entries(d.versiones_pred).map(([v, n]) => `${v}: ${fmt(n)}`).join(" · ")
+        : "ninguna persistida aún"},
+    {label: "modificado", value: (d.modificado || "").slice(0, 10),
+     delta: (d.modificado || "").slice(11, 16) + " UTC-local"},
+  ].map(t => `<div class="tile"><div class="label">${esc(t.label)}</div>
+      <div class="value">${esc(t.value)}</div><div class="delta">${esc(t.delta)}</div></div>`).join("");
+
+  // barras apiladas por ciclo de vida (train/test/filtered/abiertas) por conjunto
+  const el = document.getElementById("universo-chart");
+  const keys = ["train", "test", "filtered", "abiertas"];
+  const KEYS_ES = {train: "train", test: "test", filtered: "filtered", abiertas: "abiertas"};
+  const LC_COLORS = ["var(--series-1)", "var(--series-2)", "var(--baseline)", "var(--grid)"];
+  const rows = [];
+  for (const ds of Object.keys(cs)) {
+    const u = cs[ds];
+    const total = keys.reduce((a, k) => a + (u[k] || 0), 0) || 1;
+    const segs = keys.map((k, i) =>
+      `<div title="${KEYS_ES[k]}: ${fmt(u[k])}" style="flex:${u[k] / total};background:${LC_COLORS[i]}"></div>`).join("");
+    rows.push(`
+      <div style="display:grid;grid-template-columns:90px 1fr auto;gap:8px;align-items:center;margin:8px 0">
+        <span style="font-size:12px;color:var(--text-secondary)">${esc(ds)}</span>
+        <div style="display:flex;height:14px;border-radius:4px;overflow:hidden;gap:2px">${segs}</div>
+        <span style="font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums">${fmt(total)} filas</span>
+      </div>`);
+  }
+  el.innerHTML = rows.join("") + `
+    <div style="display:flex;gap:12px;font-size:11px;color:var(--text-secondary);margin-top:6px">
+      ${keys.map((k, i) => `<span style="display:inline-flex;align-items:center;gap:4px">
+        <span style="width:10px;height:10px;border-radius:2px;background:${LC_COLORS[i]}"></span>${KEYS_ES[k]}</span>`).join("")}
+    </div>`;
+
+  // tabla gemela del universo
+  const tb = document.querySelector("#universo-table tbody");
+  tb.innerHTML = Object.entries(cs).map(([ds, u]) => {
+    const total = keys.reduce((a, k) => a + (u[k] || 0), 0);
+    return `<tr><td>${esc(ds)}</td><td class="num">${fmt(u.train)}</td>
+      <td class="num">${fmt(u.test)}</td><td class="num">${fmt(u.filtered)}</td>
+      <td class="num">${fmt(u.abiertas)}</td><td class="num">${fmt(u.servidas)}</td>
+      <td class="num">${u.calidad_media ?? "—"}</td><td class="num">${fmt(total)}</td></tr>`;
+  }).join("");
+
+  // filas por año de publicación: barras verticales por conjunto + tabla gemela
+  for (const [ds, pares] of Object.entries(d.filas_por_ano || {})) {
+    document.getElementById("anos-chart-" + ds).innerHTML = barrasAnos(pares, ds);
+    document.querySelector("#anos-table-" + ds + " tbody").innerHTML =
+      pares.map(([a, n]) => `<tr><td>${esc(a)}</td><td class="num">${fmt(n)}</td></tr>`).join("");
+  }
+
+  // versiones de preds servidas, si las hay
+  const vp = document.getElementById("versiones-pred");
+  const vpd = d.versiones_pred || {};
+  vp.innerHTML = Object.keys(vpd).length ? `
+    <h2>Preds servidas por versión</h2>
+    <table><thead><tr><th>Versión</th><th class="num">Filas</th></tr></thead>
+    <tbody>${Object.entries(vpd).map(([v, n]) =>
+      `<tr><td>${esc(v)}</td><td class="num">${fmt(n)}</td></tr>`).join("")}</tbody></table>` : "";
+}
+
+// ============================================================ PANEL 3: HISTÓRICO
+function renderHistorico() {
+  const sel = document.getElementById("hist-select");
+  const docs = (EVAL?.historico || []).slice();
+  // (re)construir el select si cambió la lista de cierres
+  const ids = docs.map(d => d.version_modelo + "|" + d.fecha);
+  if (ids.join() !== sel.dataset.ids) {
+    sel.dataset.ids = ids.join();
+    sel.innerHTML = "";
+    for (let i = docs.length - 1; i >= 0; i--) {
+      const d = docs[i];
+      sel.add(new Option(`v${(d.version_modelo || "?").slice(0, 16)} — ${d.fecha?.slice(0, 10)}`, String(i)));
+    }
+    if (docs.length) loadHistDoc(sel.value || String(docs.length - 1));
+  }
+  if (!docs.length) {
+    document.getElementById("hist-body").innerHTML = `
+      <div class="vacio">Sin evaluaciones de cierre todavía. La primera se registrará con
+      <code>evaluate.py --modo prepromote</code> cuando el modelo actualmente expuesto sea
+      reemplazado por el siguiente reentrenamiento.</div>`;
+    document.getElementById("hist-trend").innerHTML = "";
+  } else {
+    renderTrend(docs);
+  }
+}
+
+function loadHistDoc(i) {
+  const doc = (EVAL?.historico || [])[Number(i)];
+  if (!doc) return;
+  document.getElementById("hist-body").innerHTML = renderEvalDoc(doc);
+}
+
+// KPIs de un documento de evaluación (compartidos con el panel del expuesto)
+function renderEvalDoc(doc) {
+  const html = [];
+  const f = doc.filas || {};
+  const pub = (doc.publicacion || []).join(" … ");
+  html.push(`
+    <div class="kpi-row">
+      <div class="tile"><div class="label">pool test</div>
+        <div class="value">${fmt(f.test)}</div>
+        <div class="delta">${fmt(f.evaluadas)} evaluadas · ${fmt(f.excluidas_invalidas)} excluidas</div></div>
+      ${pub ? `<div class="tile"><div class="label">publicación</div>
+        <div class="value" style="font-size:16px;padding-top:4px">${esc(pub)}</div>
+        <div class="delta">ventana de las filas test</div></div>` : ""}
+      <div class="tile"><div class="label">versión evaluada</div>
+        <div class="value" style="font-size:16px;padding-top:4px">v${esc((doc.version_modelo || "?").slice(0, 16))}</div>
+        <div class="delta">${esc((doc.fecha || "").replace("T", " ").slice(0, 16))} · modo ${esc(doc.modo)}</div></div>
+    </div>
+    <div style="height:12px"></div>`);
+  for (const [ds, m] of Object.entries(doc.metricas || {})) {
+    html.push(`
+      <h2>${esc(ds)}</h2>
+      <div class="kpi-row">
+        <div class="tile"><div class="label">system MAE (gate)</div>
+          <div class="value">${m.system?.mae ?? "—"}</div>
+          <div class="delta">n=${fmt(m.system?.n)}</div></div>
+        <div class="tile"><div class="label">num_ofertas MAE</div>
+          <div class="value">${m.num_ofertas?.mae ?? "—"}</div>
+          <div class="delta">n=${fmt(m.num_ofertas?.n)}</div></div>
+        <div class="tile"><div class="label">zero_discount AUC-PR</div>
+          <div class="value">${m.zero_discount?.aucpr ?? "—"}</div>
+          <div class="delta">n=${fmt(m.zero_discount?.n)} · P ${m.zero_discount?.precision ?? "—"} / R ${m.zero_discount?.recall ?? "—"} · prev ${(100*(m.zero_discount?.prevalencia ?? 0)).toFixed(1)}%</div></div>
+        <div class="tile"><div class="label">discount MAE</div>
+          <div class="value">${m.discount?.mae ?? "—"}</div>
+          <div class="delta">n=${fmt(m.discount?.n)}</div></div>
+      </div>
+      <div style="height:12px"></div>`);
+  }
+  return html.join("");
+}
+
+// tendencia del system MAE por versión cerrada (una tarjeta por conjunto)
+function renderTrend(docs) {
+  const series = {};
+  for (const doc of docs) {
+    for (const [ds, m] of Object.entries(doc.metricas || {})) {
+      if (m.system?.mae != null)
+        (series[ds] = series[ds] || []).push({x: (doc.version_modelo || "?").slice(5, 10), y: m.system.mae});
+    }
+  }
+  const cards = [];
+  for (const [ds, pts] of Object.entries(series)) {
+    pts.sort((a, b) => a.x < b.x ? -1 : 1);
+    const cuerpo = pts.length >= 2 ? lineChart(pts, ds)
+      : `<div style="padding:18px 4px;color:var(--text-secondary);font-size:13px">
+          system MAE <b style="color:var(--text-primary)">${pts[0].y}</b> — una sola versión
+          cerrada; la línea aparece tras la próxima migración.</div>`;
+    cards.push(`<figure class="card">
+      <figcaption><b>System MAE por versión cerrada</b> — ${esc(ds)}</figcaption>
+      ${cuerpo}</figure>`);
+  }
+  document.getElementById("hist-trend").innerHTML = cards.length ? `
+    <h2>Tendencia entre migraciones</h2><div class="chart-grid">${cards.join("")}</div>` : "";
+}
+
+// ======================================================= PANEL 4: MODELO EXPUESTO
+function renderExpuestoKpis(s) {
+  const u = s.universo || {};
+  const creado = MODELOS?.lineas?.licitaciones?.discount?.creado;
+  let edad = "";
+  if (creado) {
+    const dias = Math.max(0, Math.round((Date.now() - new Date(creado)) / 864e5));
+    edad = `hace ${dias} día${dias === 1 ? "" : "s"}`;
+  }
+  const servidas = (u.licitaciones?.servidas || 0) + (u.menores?.servidas || 0);
+  document.getElementById("expuesto-kpis").innerHTML = [
+    {label: "versión expuesta", value: "v" + (s.version || "?").slice(0, 16),
+     delta: edad ? `${creado?.slice(0, 10)} · ${edad}` : ""},
+    {label: "líneas", value: "6",
+     delta: "2 conjuntos × num · zero · discount"},
+    {label: "umbral router lic", value: MODELOS?.umbrales?.licitaciones ?? "—",
+     delta: "zero_discount → 0 (licitaciones)"},
+    {label: "umbral router men", value: MODELOS?.umbrales?.menores ?? "—",
+     delta: "zero_discount → 0 (menores)"},
+    {label: "test (pool)", value: fmt((u.licitaciones?.test || 0) + (u.menores?.test || 0)),
+     delta: `servidas acumuladas: ${fmt(servidas)}`},
+  ].map(t => `<div class="tile"><div class="label">${esc(t.label)}</div>
+      <div class="value">${esc(t.value)}</div><div class="delta">${esc(t.delta)}</div></div>`).join("");
+}
+
+function renderModelos(doc) {
+  const html = [];
+  const HP_LABEL = {objective: "obj", eval_metric: "métrica", max_depth: "d",
+                    learning_rate: "lr", subsample: "sub", colsample_bytree: "colbt",
+                    min_child_weight: "mcw", scale_pos_weight: "spw", n_estimators: "est"};
+  for (const [ds, lineas] of Object.entries(doc.lineas || {})) {
+    const rows = Object.entries(lineas).map(([linea, m]) => {
+      const hp = Object.entries(m.hp || {})
+        .filter(([, v]) => v != null)
+        .map(([k, v]) => `${HP_LABEL[k] || k} ${v}`).join(" · ");
+      return `<tr>
+        <td>${esc(linea)}</td>
+        <td class="num">${fmt(m.sizes?.train)}</td>
+        <td class="sub">${esc((m.val_window || []).join(" … "))}</td>
+        <td class="num">${fmt(m.rounds)}</td>
+        <td class="num">${m.n_features}${m.te ? " +TE" : ""}</td>
+        <td class="sub">${esc(hp)}</td>
+        <td class="num">${m.tam_ubj_mb}</td></tr>`;
+    }).join("");
+    html.push(`
+      <h2>${esc(ds)}</h2>
+      <table>
+        <thead><tr>
+          <th>Línea</th><th class="num">n train</th><th>Val (early-stop)</th>
+          <th class="num">Rounds</th><th class="num">Features</th><th>Receta (HPs del meta)</th>
+          <th class="num">.ubj MB</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+  }
+  document.getElementById("expuesto-lineas").innerHTML = html.join("");
+}
+
+function renderCurso() {
+  const el = document.getElementById("curso-body");
+  const doc = EVAL?.curso;
+  if (!doc) {
+    el.innerHTML = `
+      <div class="vacio">Sin evaluación en curso todavía: «Evaluar ahora» lanza
+      <code>evaluate.py --modo curso</code> (necesita filas test — las marca
+      <code>update.py</code> con adjudicaciones recién llegadas). El resultado se
+      sobreescribe en <code>estado_curso.json</code>.</div>`;
+    return;
+  }
+  el.innerHTML = renderEvalDoc(doc);
+}
+
+// ------------------------------------------------------------------- ops
+function markOps(ops) {
+  const busy = !!ops.op;
+  document.getElementById("evaluar-btn").disabled = busy;
+  if (ops.op === "evaluar") {
+    const note = document.getElementById("evaluar-note");
+    note.className = "op-note";
+    note.textContent = `en marcha (${ops.run_id}) — poll de /status; log: ${ops.log}`;
+  }
+}
+
+function renderRuns(tail, ops) {
+  const rows = [];
+  if (ops.op) {
+    rows.push(`<tr><td>${esc(ops.op)}</td>
+      <td><span class="status-badge running">running</span></td>
+      <td>${esc((ops.started || "").replace("T", " ").slice(0, 19))}</td>
+      <td class="sub">—</td><td class="num">—</td></tr>`);
+  }
+  for (const r of tail.slice(0, 10)) {
+    rows.push(`<tr><td>${esc(r.op)}</td>
+      <td><span class="status-badge ${esc(r.status)}">${esc(r.status)}</span></td>
+      <td>${esc((r.started || "").replace("T", " ").slice(0, 19))}</td>
+      <td>${esc((r.finished || "").replace("T", " ").slice(0, 19))}</td>
+      <td class="num">${r.rc ?? "—"}</td></tr>`);
+  }
+  document.querySelector("#runs-table tbody").innerHTML = rows.join("");
+}
+
+async function runEvaluar() {
+  const note = document.getElementById("evaluar-note");
+  note.className = "op-note"; note.textContent = "lanzando…";
+  try {
+    const r = await fetch("/ops/evaluar", {method: "POST"});
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || r.statusText);
+    note.className = "op-note ok";
+    note.textContent = `lanzado ${j.run_id} — mira Runs recientes / ${j.log}`;
+  } catch (e) {
+    note.className = "op-note err"; note.textContent = String(e.message || e);
+  }
+  setTimeout(refresh, 1500);
+}
+
+// ------------------------------------------------------------------ gráficos
+// Barras verticales: [[etiqueta, n], ...] — identidad, un hueco por conjunto.
+function barrasAnos(pares, ds) {
+  if (!pares.length) return `<span class="loading">sin filas</span>`;
+  const W = 340, H = 150, PAD_L = 40, PAD_R = 8, PAD_T = 10, PAD_B = 24;
+  const max = Math.max(...pares.map(p => p[1])) * 1.05 || 1;
+  const bw = (W - PAD_L - PAD_R) / pares.length;
+  const yOf = v => PAD_T + (1 - v / max) * (H - PAD_T - PAD_B);
+  const ticks = [0, 0.5, 1].map(t => {
+    const v = t * max, y = yOf(v);
+    return `<line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>
+      <text x="${PAD_L - 6}" y="${y + 3}" text-anchor="end" font-size="10" fill="var(--muted)">${fmt(Math.round(v))}</text>`;
+  }).join("");
+  const barras = pares.map(([k, n], i) => {
+    const x = PAD_L + i * bw, y = yOf(n);
+    return `<rect x="${(x + 1.5).toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(1, bw - 3).toFixed(1)}"
+        height="${(H - PAD_B - y).toFixed(1)}" rx="2" fill="${DS_COLORS[ds] || "var(--series-1)"}"><title>${esc(k)}: ${fmt(n)} filas</title></rect>`;
+  }).join("");
+  const etiquetas = pares.map(([k], i) => {
+    const salta = pares.length > 9 && i % 2 === 1 ? "" :
+      `<text x="${(PAD_L + i * bw + bw / 2).toFixed(1)}" y="${H - 8}" text-anchor="middle" font-size="9" fill="var(--muted)">${esc(k)}</text>`;
+    return salta;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" role="img"
+    aria-label="Filas por año de publicación de ${esc(ds)}">${ticks}${barras}${etiquetas}</svg>`;
+}
+
+// Línea multi-versión (una serie, un hueco por tarjeta).
+function lineChart(pts, ds) {
+  const W = 340, H = 150, PAD_L = 38, PAD_R = 14, PAD_T = 10, PAD_B = 26;
+  const ys = pts.map(p => p.y);
+  let yMin = Math.min(...ys), yMax = Math.max(...ys);
+  if (yMax === yMin) { yMax += 1; yMin -= 1; }
+  const yPad = (yMax - yMin) * 0.15; yMax += yPad; yMin -= yPad;
+  const xs = pts.map((_, i) => PAD_L + (i / Math.max(pts.length - 1, 1)) * (W - PAD_L - PAD_R));
+  const yOf = v => PAD_T + (1 - (v - yMin) / (yMax - yMin)) * (H - PAD_T - PAD_B);
+  const path = pts.map((p, i) => `${i ? "L" : "M"}${xs[i].toFixed(1)},${yOf(p.y).toFixed(1)}`).join(" ");
+  const ticks = [0, 0.5, 1].map(t => {
+    const v = yMin + t * (yMax - yMin), y = yOf(v);
+    return `<line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>
+      <text x="${PAD_L - 6}" y="${y + 3}" text-anchor="end" font-size="10" fill="var(--muted)">${v.toFixed(2)}</text>`;
+  }).join("");
+  const dots = pts.map((p, i) =>
+    `<circle cx="${xs[i]}" cy="${yOf(p.y)}" r="4.5" fill="${DS_COLORS[ds] || "var(--series-1)"}" stroke="var(--surface-1)" stroke-width="2"><title>v ${esc(p.x)}: system MAE ${p.y}</title></circle>`).join("");
+  const xLab = pts.map((p, i) =>
+    `<text x="${xs[i]}" y="${H - 8}" text-anchor="middle" font-size="10" fill="var(--muted)">${esc(p.x)}</text>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" data-ds="${esc(ds)}" role="img"
+    aria-label="System MAE por versión cerrada de ${esc(ds)}">
+    ${ticks}
+    <path d="${path}" fill="none" stroke="${DS_COLORS[ds] || "var(--series-1)"}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    ${dots}${xLab}
+  </svg>`;
+}
+
+function toggleTable(id) {
+  const t = document.getElementById(id);
+  if (t) t.hidden = !t.hidden;
+}
+
+// ---------------------------------------------------------------- arranque
+refresh();
+cargarDatos();
+cargarModelos();
+cargarEvaluaciones();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>
