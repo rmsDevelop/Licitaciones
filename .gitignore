@@ -4,6 +4,9 @@ Data/
 # modelos entrenados y sus metas — artefactos, se regeneran con training.py
 Models/
 
+# registro de construcción sesión a sesión — local, no se publica
+BUILDLOG.md
+
 # python
 .venv/
 __pycache__/
