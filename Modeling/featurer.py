@@ -1,251 +1,145 @@
 #Crea Data/features.parquet con las filas ml_estado=='train' (ambos conjuntos):
-#id + ano + fecha_publicacion (claves de split) + los tres objetivos
-#(num_ofertas, discount_pct, zero_discount) + la UNION de features de las seis
-#lineas del Lab. Los criterios son un puerto de Licitaciones-Lab
-#(_common/featurizer.py): mismas transformaciones, mismas reglas de leakage
-#(solo conocidas en publicacion), mismos casts categoricos. Donde las lineas
-#del Lab discrepaban (base monetaria, caps de ratio/duracion, texto de objeto)
-#la tabla union lleva variantes con sufijo y FEATURES_LINEA decide cual usa cada
-#linea — ese dict es el contrato compartido con training.py e Inference/.
+#claves + los tres objetivos + las 19 features f_* de Nueva_Licitaciones_Lab
+#(featuring.py, puerto literal de sus formulas — la verificacion de oro es un
+#join por id contra el parquet del Lab exigiendo igualdad exacta). La capa es
+#el conjunto CERRADO que training consume: cada linea selecciona las suyas de
+#FEATURES_LINEA y el encoding del organo (TE / frecuencia / nativo) lo anade
+#training — lo aprendido del split nunca es columna estatica.
+#
+#Divergencias conscientes respecto del featurizer anterior (Lab viejo),
+#heredadas del Lab nuevo y documentadas en su BUILDLOG: SIN tepe 1e9 del
+#dinero (log1p maneja la escala), SIN cap 10 del ratio al estimado (misma
+#base sin-IVA en ambos operandos), f_objeto_len del texto CRUDO (sin
+#NFKD-strip), nulos CONSERVADOS (adios al fillna("missing") — el fill es
+#politica del trainer), f_procedimiento materializada en ambos conjuntos
+#(constante '6' en menores; la seleccion es de cada linea), sin hist_volume_*
+#ni row_missing_count ni keywords ni INT-*.
 
 from __future__ import annotations
 
 import argparse
 import os
-import unicodedata
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 # ---------------------------------------------------------------------------
-# Constantes portadas del Lab
+# La capa f_* (puerto de FEAT_COLS/FEAT_SCHEMA de featuring.py del Lab)
 # ---------------------------------------------------------------------------
-MONEY_ERR_CEILING = 1e9          # euros; por encima, error de datos -> NaN
-DURATION_DAYS_MAX = 365.25 * 50  # duraciones mayores/negativas -> NaN
-DURACION_CAP_DAYS = 365.25 * 10  # tope del log capado (una decada)
-UNIT_TO_DAYS = {"ANN": 365.25, "MON": 30.437, "DAY": 1.0}
-CPV_DELIM = ";"
+FEAT_COLS = ["f_log_importe_con_iva", "f_log_importe_sin_iva", "f_ano",
+             "f_pub_mes", "f_nuts1", "f_nuts3", "f_duracion_days",
+             "f_duracion_missing", "f_cpv_division", "f_tipo_contrato",
+             "f_procedimiento", "f_organo_contratante", "f_urgencia",
+             "f_es_pyme",
+             # tanda 3
+             "f_cpv_grupo", "f_nuts2", "f_objeto_len",
+             "f_ratio_estimado", "f_estimado_missing"]
 
-# Flags de keywords del objeto (insensibles a acentos; mismo set del Lab).
-OBJETO_KEYWORDS = [
-    "acuerdo marco", "emergencia", "obra", "redes", "seguro", "limpieza",
-    "software", "salud", "sanitario", "electric", "ingenieria", "tecnolog", "urgente",
-]
+# num | cat: el contrato de tipos que lee training (las categoricas entran
+# nativas a XGBoost; los trainers y el meta deciden niveles).
+TIPOS = {
+    "f_log_importe_con_iva": "num", "f_log_importe_sin_iva": "num",
+    "f_ano": "num", "f_pub_mes": "num", "f_duracion_days": "num",
+    "f_duracion_missing": "num", "f_es_pyme": "num", "f_objeto_len": "num",
+    "f_ratio_estimado": "num", "f_estimado_missing": "num",
+    "f_nuts1": "cat", "f_nuts3": "cat", "f_nuts2": "cat",
+    "f_cpv_division": "cat", "f_cpv_grupo": "cat", "f_tipo_contrato": "cat",
+    "f_procedimiento": "cat", "f_organo_contratante": "cat", "f_urgencia": "cat",
+}
 
-# Columnas dropeadas para TODAS las lineas (puerto de COMMON_DROP_COLS):
-# fugas post-adjudicacion, no conocidas en publicacion, calidad leaky,
-# cuasi-constantes, identificadores/texto/precedencia y columnas raw
-# reemplazadas por derivadas. INT-CONS-20 solo existe en licitaciones.
-DROP_COLS = [
-    # post-adjudicacion (fuga)
-    "importe_adj_con_iva", "importe_adjudicacion",
-    "adjudicatario", "nif_adjudicatario", "fecha_adjudicacion", "fecha_updated",
-    # no conocidas en publicacion
-    "estado", "estado_code",
-    # calidad leaky + compuesto
-    "score_calidad", "INT-VAL-02", "INT-VAL-03", "INT-VAL-07", "INT-VAL-12",
-    "INT-CONS-01", "INT-CONS-08", "INT-CONS-18", "INT-CONS-20", "INT-FIA-01", "INT-FIA-09",
-    # cuasi-constantes serve-safe
-    "INT-VAL-06", "INT-VAL-09", "INT-VAL-10", "INT-FIA-08",
-    # identificadores / texto / precedencia / reemplazadas
-    "expediente", "objeto", "nif_organo", "id_plataforma", "dependencia",
-    "url", "hora_limite", "es_menor",
-    "valor_estimado_contrato", "importe_con_iva",
-    "duracion", "duracion_unidad", "fecha_limite",
-    "nuts", "cpv_principal", "cpvs",
-    "procedimiento", "tipo_contrato",  # las _code las portan
-    "ubicacion",  # redundante con nuts
-]
-# importe_sin_iva: dropeada en licitaciones; feature en menores zd/disc.
+# Tipos Arrow de la capa (los mismos del Lab: el parquet del motor y el suyo
+# quedan comparables columna a columna).
+FEAT_SCHEMA = pa.schema([
+    ("f_log_importe_con_iva", pa.float64()),
+    ("f_log_importe_sin_iva", pa.float64()),
+    ("f_ano", pa.int16()),
+    ("f_pub_mes", pa.int8()),
+    ("f_nuts1", pa.string()),
+    ("f_nuts3", pa.string()),
+    ("f_duracion_days", pa.float64()),
+    ("f_duracion_missing", pa.int8()),
+    ("f_cpv_division", pa.string()),
+    ("f_tipo_contrato", pa.string()),
+    ("f_procedimiento", pa.string()),
+    ("f_organo_contratante", pa.string()),
+    ("f_urgencia", pa.string()),
+    ("f_es_pyme", pa.bool_()),
+    ("f_cpv_grupo", pa.string()),
+    ("f_nuts2", pa.string()),
+    ("f_objeto_len", pa.int32()),
+    ("f_ratio_estimado", pa.float64()),
+    ("f_estimado_missing", pa.int8()),
+])
 
-CATEGORICAL_BASE = [
-    "tipo_contrato_code", "subtipo_code", "urgencia",
-    "financiacion_ue", "es_pyme",
-    "organo_contratante", "dir3_organo", "ciudad_organo",
-    "cpv_division", "cpv_group", "cpv_class",
-    "nuts_country", "nuts1", "nuts2", "nuts3",
-]
+# Columnas raw que hacen falta para derivar (lectura ligera del almacén).
+COLS_NECESARIAS = ["importe_con_iva", "importe_sin_iva",
+                   "valor_estimado_contrato", "objeto", "fecha_publicacion",
+                   "nuts", "duracion", "duracion_unidad", "cpv_principal",
+                   "tipo_contrato_code", "procedimiento_code",
+                   "organo_contratante", "urgencia", "es_pyme", "ano"]
+
+# Duracion normalizada a dias: factores y rango validos (paridad Lab).
+DURACION_FACTORES = {"ANN": 365.25, "MON": 30.437, "DAY": 1.0}
+DURACION_DAYS_MAX = 365.25 * 50
 
 # ---------------------------------------------------------------------------
-# Bloques de features (composicion de las listas por linea)
+# Seleccion por linea (los campeones del Lab, BUILDLOG sesion 9)
 # ---------------------------------------------------------------------------
-FE_CPV = ["cpv_division", "cpv_group", "cpv_class", "cpv_count", "is_multi_cpv",
-          "cpv_count_missing", "n_cpv_divisions", "is_multi_division"]
-FE_NUTS = ["nuts_country", "nuts1", "nuts2", "nuts3", "nuts_granularity"]
-FE_DURACION = ["duracion_days", "duracion_missing"]
-FE_TIEMPO = ["pub_month", "pub_quarter", "pub_dayofweek", "pub_is_weekend",
-             "pub_is_august", "deadline_missing"]
-FE_OBJETO_BASE = ["objeto_has_" + kw.replace(" ", "_") for kw in OBJETO_KEYWORDS]
-FE_OBJETO_TEXT = ["objeto_len", "objeto_word_count"]
-FE_INTS = ["INT-VAL-01", "INT-VAL-04", "INT-VAL-05", "INT-VAL-14", "INT-FIA-11"]
-FE_MISSING = ["valor_estimado_contrato_missing", "row_missing_count"]
+# lic: 13 base (con f_procedimiento y base CON IVA) + 5 de la tanda 3;
+#      el organo lo codifica training (TE en num/disc, frecuencia en zd).
+# men: 12 base (sin f_procedimiento, base SIN IVA); zd/disc anaden la tanda 3
+#      y num conserva el campeón de la sesión 7 (sin tanda 3) + f_organo_te.
+_LIC_T3 = ["f_cpv_grupo", "f_nuts2", "f_objeto_len", "f_ratio_estimado",
+           "f_estimado_missing"]
+_MEN_BASE = ["f_log_importe_sin_iva", "f_ano", "f_pub_mes",
+             "f_duracion_days", "f_duracion_missing", "f_es_pyme",
+             "f_nuts1", "f_nuts3", "f_cpv_division", "f_tipo_contrato",
+             "f_organo_contratante", "f_urgencia"]
 
-# Dinero por linea (base + cap del ratio):
-#   lic num/zd:  log_budget_con_iva + budget_to_estimado_con_iva_raw
-#   lic disc:    log_budget_con_iva + budget_to_estimado_con_iva_cap
-#   men num:     log_budget_con_iva + budget_to_estimado_con_iva_cap
-#   men zd/disc: log_budget_sin_iva + budget_to_estimado_sin_iva_cap + importe_sin_iva
-DINERO_LIC_RAW = ["log_budget_con_iva", "budget_to_estimado_con_iva_raw"]
-DINERO_LIC_CAP = ["log_budget_con_iva", "budget_to_estimado_con_iva_cap"]
-DINERO_MEN_NUM = ["log_budget_con_iva", "budget_to_estimado_con_iva_cap"]
-DINERO_MEN_SIN = ["log_budget_sin_iva", "budget_to_estimado_sin_iva_cap", "importe_sin_iva"]
+FEATURES_LINEA = {
+    "licitaciones/num_ofertas": ["f_log_importe_con_iva", "f_ano", "f_pub_mes",
+        "f_duracion_days", "f_duracion_missing", "f_es_pyme", "f_nuts1",
+        "f_nuts3", "f_cpv_division", "f_tipo_contrato", "f_procedimiento",
+        "f_organo_contratante", "f_urgencia"] + _LIC_T3,
+    "licitaciones/zero_discount": ["f_log_importe_con_iva", "f_ano", "f_pub_mes",
+        "f_duracion_days", "f_duracion_missing", "f_es_pyme", "f_nuts1",
+        "f_nuts3", "f_cpv_division", "f_tipo_contrato", "f_procedimiento",
+        "f_organo_contratante", "f_urgencia"] + _LIC_T3,
+    "licitaciones/discount": ["f_log_importe_con_iva", "f_ano", "f_pub_mes",
+        "f_duracion_days", "f_duracion_missing", "f_es_pyme", "f_nuts1",
+        "f_nuts3", "f_cpv_division", "f_tipo_contrato", "f_procedimiento",
+        "f_organo_contratante", "f_urgencia"] + _LIC_T3,
+    "menores/num_ofertas": list(_MEN_BASE),
+    "menores/zero_discount": _MEN_BASE + _LIC_T3,
+    "menores/discount": _MEN_BASE + _LIC_T3,
+}
 
-# Duracion log: lic num/zd sin cap (raw); el resto capado a una decada.
-LOG_DUR_RAW = ["log_duracion_days_raw"]
-LOG_DUR_CAP = ["log_duracion_days"]
-
-HIST_LIC = ["hist_volume_nuts3", "hist_volume_cpv_division", "hist_volume_procedimiento_code"]
-HIST_MEN = ["hist_volume_nuts3", "hist_volume_cpv_division", "hist_volume_tipo_contrato_code"]
-
-_BASE = list(dict.fromkeys(
-    ["ano"] + FE_CPV + FE_NUTS + FE_DURACION + FE_TIEMPO + FE_OBJETO_BASE + FE_INTS
-    + FE_MISSING + CATEGORICAL_BASE + ["INT-FIA-04"]))
-
-# Las seis lineas del Lab (campeones): la lista exacta de columnas que usa cada
-# una. Contrato con training.py (y con Inference/, via el meta de cada modelo).
-FEATURES_LINEA = {k: list(dict.fromkeys(v)) for k, v in {
-    "licitaciones/num_ofertas": ["procedimiento_code"] + _BASE + DINERO_LIC_RAW + LOG_DUR_RAW + HIST_LIC,
-    "licitaciones/zero_discount": ["procedimiento_code"] + _BASE + DINERO_LIC_RAW + LOG_DUR_RAW + HIST_LIC,
-    "licitaciones/discount": ["procedimiento_code"] + _BASE + DINERO_LIC_CAP + LOG_DUR_CAP + HIST_LIC + FE_OBJETO_TEXT,
-    "menores/num_ofertas": _BASE + DINERO_MEN_NUM + LOG_DUR_CAP + HIST_MEN + FE_OBJETO_TEXT,
-    "menores/zero_discount": _BASE + DINERO_MEN_SIN + LOG_DUR_CAP + HIST_MEN + FE_OBJETO_TEXT,
-    "menores/discount": _BASE + DINERO_MEN_SIN + LOG_DUR_CAP + HIST_MEN + FE_OBJETO_TEXT,
-}.items()}
-
-# Objetivo por linea y poblacion (mascara sobre la tabla de features).
+# Objetivo por linea y poblacion (mascara sobre la tabla de features). La
+# poblacion por linea reproduce las ok_* del Lab (paridad verificada).
 TARGET_LINEA = {
     "num_ofertas": ("num_ofertas", "num_ofertas.notna() & between(0,50)"),
     "zero_discount": ("zero_discount", "discount_pct.notna() & between(0,70)"),
     "discount": ("discount_pct", "discount_pct.notna() & between(0,70)"),
 }
 
+CLAVES = ["id", "conjunto", "ano", "fecha_publicacion"]
+OBJETIVOS = ["num_ofertas", "discount_pct", "zero_discount"]
+
+# Esquema completo del parquet de entrenamiento (claves + capa + objetivos).
+SALIDA_SCHEMA = pa.schema(
+    [("id", pa.string()), ("conjunto", pa.string()), ("ano", pa.int64()),
+     ("fecha_publicacion", pa.timestamp("us"))]
+    + list(FEAT_SCHEMA)
+    + [("num_ofertas", pa.float64()), ("discount_pct", pa.float64()),
+       ("zero_discount", pa.float32())])
+
+
 # ---------------------------------------------------------------------------
-# Helpers (puerto del Lab)
+# Derivacion (puerto literal de featuring.py::derivar — formulas exactas)
 # ---------------------------------------------------------------------------
-def _strip_accents(s: str) -> str:
-    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-
-
-def harden(df: pd.DataFrame) -> pd.DataFrame:
-    """Tope de dinero implausible (1e9); las fechas quedan como estan."""
-    df = df.copy()
-    for col in ["importe_sin_iva", "importe_con_iva", "valor_estimado_contrato"]:
-        if col in df.columns:
-            df.loc[df[col] > MONEY_ERR_CEILING, col] = np.nan
-    return df
-
-
-def add_cpv_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    cpv = df["cpv_principal"].astype("string")
-    df["cpv_division"] = cpv.str.slice(0, 2)
-    df["cpv_group"] = cpv.str.slice(0, 3)
-    df["cpv_class"] = cpv.str.slice(0, 4)
-    n_cpv = df["cpvs"].astype("string").str.split(CPV_DELIM).str.len()
-    df["cpv_count"] = pd.to_numeric(n_cpv, errors="coerce")
-    df["is_multi_cpv"] = (n_cpv.fillna(1) > 1).astype("int8")
-    df["cpv_count_missing"] = n_cpv.isna().astype("int8")
-    parts = df["cpvs"].astype("string").str.split(CPV_DELIM)
-    n_div = parts.apply(lambda lst: len({p.strip()[:2] for p in lst
-                                         if isinstance(lst, list) and len(p.strip()) >= 2})
-                        if isinstance(lst, list) else np.nan)
-    n_div = pd.to_numeric(n_div, errors="coerce")
-    df["n_cpv_divisions"] = n_div.clip(upper=5)
-    df["is_multi_division"] = (n_div.fillna(1) > 1).astype("int8")
-    return df
-
-
-def add_nuts_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    n = df["nuts"].astype("string")
-    df["nuts_country"] = n.str.slice(0, 2)
-    df["nuts1"] = n.where(n.str.len() >= 3).str.slice(0, 3)
-    df["nuts2"] = n.where(n.str.len() >= 4).str.slice(0, 4)
-    df["nuts3"] = n.where(n.str.len() >= 5).str.slice(0, 5)
-    df["nuts_granularity"] = pd.to_numeric(n.str.len(), errors="coerce")
-    return df
-
-
-def add_money_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Las variantes de las seis lineas, cada una con su nombre."""
-    df = df.copy()
-    con, sin, valor = df["importe_con_iva"], df["importe_sin_iva"], df["valor_estimado_contrato"]
-    df["log_budget_con_iva"] = np.log1p(con)
-    df["log_budget_sin_iva"] = np.log1p(sin)
-    ratio_con = (con / valor).replace([np.inf, -np.inf], np.nan)
-    ratio_sin = (sin / valor).replace([np.inf, -np.inf], np.nan)
-    df["budget_to_estimado_con_iva_raw"] = ratio_con
-    df["budget_to_estimado_con_iva_cap"] = ratio_con.clip(upper=10.0)
-    df["budget_to_estimado_sin_iva_cap"] = ratio_sin.clip(upper=10.0)
-    return df
-
-
-def add_duration_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    days = pd.to_numeric(df["duracion"], errors="coerce") * df["duracion_unidad"].astype("string").map(UNIT_TO_DAYS)
-    days = days.where(days.between(0, DURATION_DAYS_MAX))
-    df["duracion_days"] = days.astype("float64")
-    df["log_duracion_days"] = np.log1p(days.clip(upper=DURACION_CAP_DAYS))
-    df["log_duracion_days_raw"] = np.log1p(days)
-    df["duracion_missing"] = days.isna().astype("int8")
-    return df
-
-
-def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    pub = df["fecha_publicacion"]
-    dow = pub.dt.dayofweek
-    df["pub_month"] = pd.to_numeric(pub.dt.month, errors="coerce")
-    df["pub_quarter"] = pd.to_numeric(pub.dt.quarter, errors="coerce")
-    df["pub_dayofweek"] = pd.to_numeric(dow, errors="coerce")
-    df["pub_is_weekend"] = (dow >= 5).astype("int8")
-    df["pub_is_august"] = (pub.dt.month == 8).astype("int8")
-    df["deadline_missing"] = df["fecha_limite"].isna().astype("int8")
-    return df
-
-
-def add_objeto_flags(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    obj = df["objeto"].fillna("").str.lower().map(_strip_accents)
-    df["objeto_len"] = obj.str.len().astype("Int32")
-    df["objeto_word_count"] = obj.str.split().str.len().astype("Int32")
-    for kw in OBJETO_KEYWORDS:
-        df["objeto_has_" + kw.replace(" ", "_")] = obj.str.contains(kw, regex=False, na=False).astype("int8")
-    return df
-
-
-def encode_flags(df: pd.DataFrame) -> pd.DataFrame:
-    """es_pyme / financiacion_ue -> categoria 'missing' explicita; INT-FIA-04 -> int."""
-    df = df.copy()
-    df["es_pyme"] = df["es_pyme"].map({True: "si", False: "no"}).fillna("missing")
-    df["financiacion_ue"] = df["financiacion_ue"].astype("string").fillna("missing")
-    if "INT-FIA-04" in df.columns:
-        df["INT-FIA-04"] = df["INT-FIA-04"].astype("int8")
-    return df
-
-
-def add_missingness(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    if "valor_estimado_contrato" in df.columns:
-        df["valor_estimado_contrato_missing"] = df["valor_estimado_contrato"].isna().astype("int8")
-    return df
-
-
-def add_prior_year_volumes(df: pd.DataFrame, seg_lists: list[list[str]]) -> pd.DataFrame:
-    """Recuentos del ano ANTERIOR por segmento (ano < ano de la fila): contexto
-    de mercado sin fuga (nunca medias del objetivo)."""
-    df = df.copy()
-    for seg in seg_lists:
-        name = "hist_volume_" + seg[0]
-        g = df.groupby(seg + ["ano"], observed=True).size()
-        prior = g.groupby(level=seg).cumsum() - g
-        idx = pd.MultiIndex.from_frame(df[seg + ["ano"]])
-        df[name] = pd.to_numeric(prior.reindex(idx).to_numpy(), errors="coerce")
-    return df
-
-
 def fix_ano(s: pd.Series) -> pd.Series:
     """Repara el bug de anno a dos digitos y acota a (2000, ano en curso)."""
     s = s.copy()
@@ -255,122 +149,140 @@ def fix_ano(s: pd.Series) -> pd.Series:
     return s
 
 
+def derivar(d: pd.DataFrame) -> pd.DataFrame:
+    """Devuelve las columnas de FEAT_COLS para `d` (trae COLS_NECESARIAS).
+
+    Funciones puras y vectorizadas: solo informacion conocida en publicacion,
+    nulos conservados (el fill es politica del trainer).
+    """
+    out = pd.DataFrame(index=d.index)
+
+    # dinero: las dos bases en log1p, sin tepe (decision del Lab)
+    out["f_log_importe_con_iva"] = np.log1p(d["importe_con_iva"])
+    out["f_log_importe_sin_iva"] = np.log1p(d["importe_sin_iva"])
+
+    # tiempo: mes de publicacion (NaT -> null)
+    out["f_pub_mes"] = d["fecha_publicacion"].dt.month.astype("Int8")
+
+    # geo: slices de nuts solo si el codigo llega a ese nivel
+    nuts = d["nuts"].astype("string")
+    out["f_nuts1"] = nuts.where(nuts.str.len() >= 3).str[:3]
+    out["f_nuts3"] = nuts.where(nuts.str.len() >= 5).str[:5]
+
+    # duracion normalizada a dias; fuera de rango -> NaN (y missing=1)
+    num = pd.to_numeric(d["duracion"], errors="coerce")
+    factor = d["duracion_unidad"].astype("string").map(DURACION_FACTORES)
+    days = num * factor
+    out["f_duracion_days"] = days.where(days.between(0, DURACION_DAYS_MAX)).astype("float64")
+    out["f_duracion_missing"] = out["f_duracion_days"].isna().astype("int8")
+
+    # cpv: division (2 digitos) y grupo (3); nulos conservados
+    out["f_cpv_division"] = d["cpv_principal"].astype("string").str[:2]
+    out["f_cpv_grupo"] = d["cpv_principal"].astype("string").str[:3]
+
+    # tanda 3: geo intermedia, texto crudo, planificacion
+    out["f_nuts2"] = nuts.where(nuts.str.len() >= 4).str[:4]
+    out["f_objeto_len"] = d["objeto"].str.len().astype("Int32")
+    est = pd.to_numeric(d["valor_estimado_contrato"], errors="coerce")
+    out["f_ratio_estimado"] = (d["importe_sin_iva"] / est).replace(
+        [np.inf, -np.inf], np.nan).astype("float64")
+    out["f_estimado_missing"] = est.isna().astype("int8")
+
+    # materializaciones: copias con cast ligero, nulos conservados
+    out["f_tipo_contrato"] = d["tipo_contrato_code"].astype("string")
+    out["f_procedimiento"] = d["procedimiento_code"].astype("string")
+    out["f_urgencia"] = d["urgencia"].astype("string")
+    out["f_es_pyme"] = d["es_pyme"].astype("boolean")
+    out["f_organo_contratante"] = d["organo_contratante"].astype("string")
+
+    # tendencia: ano de publicacion (== raw ano; verificado en el Lab)
+    out["f_ano"] = d["fecha_publicacion"].dt.year.astype("Int16")
+
+    return out[FEAT_COLS]
+
+
 # ---------------------------------------------------------------------------
 # Featurizacion de un conjunto
 # ---------------------------------------------------------------------------
 def featurizar_conjunto(df: pd.DataFrame, conjunto: str) -> pd.DataFrame:
-    """Tabla de features union para las filas train de un conjunto.
+    """Tabla claves + objetivos + capa f_* para las filas de un conjunto.
 
     Recibe el DataFrame con las columnas raw + calidad (sin preds/ml_estado)
-    ya filtrado a ml_estado=='train'. Devuelve id/claves/objetivos + features.
+    de UN conjunto. La usa run() (entrenamiento) e Inference/inference.py
+    (servido) — mismo codigo, sin copia.
     """
-    es_lic = conjunto == "licitaciones"
+    df = df.copy()
+    df["ano"] = fix_ano(df["ano"]).round().astype("Int64")
 
     # 0. Objetivos. discount_pct por base del conjunto; zero_discount = (disc==0).
-    if es_lic:
+    if conjunto == "licitaciones":
         base, adj = df["importe_con_iva"], df["importe_adj_con_iva"]
     else:
         base, adj = df["importe_sin_iva"], df["importe_adjudicacion"]
     disc = (1 - adj / base) * 100
-    df = df.assign(
-        discount_pct=disc.where(base.notna() & (base > 0) & adj.notna()),
-    )
-    df["zero_discount"] = (df["discount_pct"] == 0).astype("float32").where(df["discount_pct"].notna())
+    df["discount_pct"] = disc.where(base.notna() & (base > 0) & adj.notna())
+    df["zero_discount"] = (df["discount_pct"] == 0).astype("float32").where(
+        df["discount_pct"].notna())
 
-    # 1. Missingness de fila: sobre las raw + calidad + objetivos (las preds y
-    #    ml_estado no describen la fila y no cuentan).
-    conteo_cols = [c for c in df.columns if c not in ("ml_estado",)]
-    df["row_missing_count"] = df[conteo_cols].isna().sum(axis=1).astype("float64")
+    # 1. Capa f_* (la unica feature que existe: conjunto cerrado).
+    f = derivar(df)
 
-    # 2. Derivadas (puerto del Lab).
-    df = harden(df)
-    df = add_cpv_features(df)
-    df = add_nuts_features(df)
-    df = add_money_features(df)
-    df = add_duration_features(df)
-    df = add_time_features(df)
-    df = add_objeto_flags(df)
-    df = encode_flags(df)
-    df = add_missingness(df)
-    df = add_prior_year_volumes(df, [["nuts3"], ["cpv_division"],
-                                     ["procedimiento_code"] if es_lic else ["tipo_contrato_code"]])
-
-    # 3. Drops: lista comun + importe_sin_iva en licitaciones (en menores es
-    #    feature de zd/disc); procedimiento_code en menores (constante).
-    drops = list(DROP_COLS)
-    if es_lic:
-        drops.append("importe_sin_iva")
-    else:
-        drops.append("procedimiento_code")
-    df = df.drop(columns=[c for c in drops if c in df.columns])
-
-    # 4. Cast categorico (missing explicito).
-    for c in CATEGORICAL_BASE + (["procedimiento_code"] if es_lic else []):
-        df[c] = df[c].astype("string").fillna("missing").astype("category")
-
-    return df
+    out = df[CLAVES].copy()
+    for c in FEAT_COLS:
+        out[c] = f[c]
+    for c in OBJETIVOS:
+        if c == "num_ofertas":
+            out[c] = df["num_ofertas"].astype("float64")
+        else:
+            out[c] = df[c]
+    return out
 
 
-CLAVES = ["id", "conjunto", "ano", "fecha_publicacion"]
-OBJETIVOS = ["num_ofertas", "discount_pct", "zero_discount"]
-
-
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
 def run(data_dir: Path, salida: Path | None = None) -> None:
     path = data_dir / "licitaciones.parquet"
     salida = salida or data_dir / "features.parquet"
 
-    # Solo las columnas necesarias (raw + calidad + estado de ML para filtrar).
-    cols = pq.read_schema(path).names
-    leer = [c for c in cols if c not in
-            ("num_ofertas_pred", "zero_discount_prob", "zero_discount_pred",
-             "discount_pct_pred", "system_discount_pct_pred", "version")]
+    # Lectura ligera: claves + estado + raws que alimentan la capa y objetivos.
+    leer = list(dict.fromkeys(
+        CLAVES + ["ml_estado"] + COLS_NECESARIAS
+        + ["num_ofertas", "importe_adj_con_iva", "importe_adjudicacion"]))
     df = pq.read_table(path, columns=leer).to_pandas()
     df = df[df["ml_estado"] == "train"].drop(columns=["ml_estado"]).reset_index(drop=True)
-    df["ano"] = fix_ano(df["ano"]).round().astype("Int64")
     print(f"filas train: {len(df):,}")
 
     tablas = []
     for conjunto in ("licitaciones", "menores"):
-        sub = df[df["conjunto"] == conjunto].copy()
+        sub = df[df["conjunto"] == conjunto]
         print(f"featurizando {conjunto}: {len(sub):,} filas")
         fe = featurizar_conjunto(sub, conjunto)
 
-        # Features union del conjunto = columnas presentes menos claves/objetivos.
-        feats = [c for c in fe.columns if c not in CLAVES + OBJETIVOS]
-        # Cuasi-constantes fuera (decision de tabla de entrenamiento).
-        const = [c for c in feats if fe[c].nunique(dropna=True) <= 1]
-        if const:
-            print(f"  columnas constantes dropeadas: {const}")
-            fe = fe.drop(columns=const)
-            feats = [c for c in feats if c not in const]
-
-        # Validacion del contrato: cada linea tiene todas sus features (se
-        # toleran las dropeadas por constantes — sin varianza, sin senal; el
-        # Lab las dropeaba igual, por linea).
+        # Validacion del contrato: cada linea tiene todas sus features.
         for linea in FEATURES_LINEA:
-            if not linea.startswith(conjunto):
-                continue
-            faltan = [c for c in FEATURES_LINEA[linea]
-                      if c not in fe.columns and c not in const]
-            if faltan:
-                raise ValueError(f"{linea}: faltan features {faltan}")
-
-        tablas.append(fe[CLAVES + feats + OBJETIVOS])
-        print(f"  {len(feats)} features, {len(fe):,} filas")
+            if linea.startswith(conjunto):
+                faltan = [c for c in FEATURES_LINEA[linea] if c not in fe.columns]
+                if faltan:
+                    raise ValueError(f"{linea}: faltan features {faltan}")
+        tablas.append(fe)
+        print(f"  {len(FEAT_COLS)} features, {len(fe):,} filas")
         del sub, fe
 
     # Union en un solo parquet (licitaciones primero, para que el filtro por
-    # conjunto en training pueda saltarse row groups).
+    # conjunto en training pueda saltarse row groups) con esquema explicito.
     union = pd.concat(tablas, ignore_index=True)
     del tablas, df
-    print(f"escrito: {salida}  ({len(union):,} filas x {union.shape[1]} columnas)")
+    tabla = pa.Table.from_pandas(union, schema=SALIDA_SCHEMA, preserve_index=False)
+    print(f"escrito: {salida}  ({len(union):,} filas x {tabla.num_columns} columnas)")
     tmp = salida.with_suffix(".parquet.tmp")
-    union.to_parquet(tmp, index=False, compression="snappy")
+    pq.write_table(tabla, tmp, compression="snappy")
     os.replace(tmp, salida)
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Generar features.parquet (filas train).")
+    p = argparse.ArgumentParser(
+        description="Generar features.parquet (filas train, capa f_* del Lab).")
     p.add_argument("--data-dir", default="Data", help="directorio con licitaciones.parquet")
     p.add_argument("--salida", default=None, help="ruta de salida del parquet")
     args = p.parse_args()

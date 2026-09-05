@@ -81,7 +81,7 @@ def metricas_conjunto(sub: pd.DataFrame, umbral: float) -> dict:
 # ---------------------------------------------------------------------------
 # Evaluacion
 # ---------------------------------------------------------------------------
-def run(data_dir: Path, models_dir: Path, feats_path: Path, modo: str,
+def run(data_dir: Path, models_dir: Path, modo: str,
         dry_run: bool = False) -> dict:
     path = data_dir / "licitaciones.parquet"
     df = pd.read_parquet(path, filters=[("ml_estado", "==", "test")])
@@ -99,7 +99,7 @@ def run(data_dir: Path, models_dir: Path, feats_path: Path, modo: str,
           f"excluidas por invalidas: {int((~valido).sum()):,}")
 
     sub = df[valido].reset_index(drop=True)
-    servido = inference.inferir(sub.drop(columns=["ml_estado"]), models_dir, feats_path)
+    servido = inference.inferir(sub.drop(columns=["ml_estado"]), models_dir)
 
     # Objetivos reales: num tal cual; discount por base del conjunto (cleaning).
     servido["discount_pct"] = np.nan
@@ -160,11 +160,9 @@ def main() -> None:
                         "prepromote: evaluacion de cierre del modelo a reemplazar (historico)")
     p.add_argument("--data-dir", default="Data", help="directorio con licitaciones.parquet")
     p.add_argument("--models-dir", default="Models")
-    p.add_argument("--feats", default="Data/features.parquet",
-                   help="tabla train: base de los hist_volume")
     p.add_argument("--dry-run", action="store_true", help="informe sin registrar")
     args = p.parse_args()
-    run(Path(args.data_dir), Path(args.models_dir), Path(args.feats), args.modo, args.dry_run)
+    run(Path(args.data_dir), Path(args.models_dir), args.modo, args.dry_run)
 
 
 if __name__ == "__main__":

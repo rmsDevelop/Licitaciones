@@ -207,11 +207,15 @@
 <!-- ======================= PANEL 2: LABORATORIO ======================= -->
 <section id="panel-lab" role="tabpanel" aria-labelledby="tab-lab" hidden>
   <p class="panel-intro">
-    Destinado a recoger la información de <code>../Licitaciones-Lab</code> — el laboratorio
-    congelado donde se desarrollaron las features y los hiperparámetros campeones que
-    <code>Modeling/featurer.py</code> unifica para este rework.
+    Los campeones de <code>../Nueva_Licitaciones_Lab</code> promovidos a este motor — el
+    laboratorio de experimentación cuyo registro (<code>experimentos/*.trainings.json</code>,
+    append-only) documenta cada corrida: población, features, receta y métricas val/test
+    con su protocolo de ciclo simulado. La promoción es un puerto a mano: la constante
+    <code>PROMOVIDOS_LAB</code> de <code>api.py</code> fija qué experimento corre en producción.
   </p>
-  <div class="vacio">Vacío por ahora — se poblará cuando el Lab aporte información que mostrar.</div>
+  <div class="kpi-row" id="lab-kpis"><span class="loading">cargando laboratorio…</span></div>
+  <div style="height:14px"></div>
+  <div id="lab-lineas"></div>
 </section>
 
 <!-- ======================= PANEL 3: HISTÓRICO ======================= -->
@@ -343,8 +347,9 @@ async function refresh() {
     // log abierto del paso en marcha: refrescarlo con el poll
     const caja = document.getElementById("run-log");
     if (LOG_ABIERTO && s.ops?.log_run_id === LOG_ABIERTO && !caja.hidden) cargarLog(LOG_OP, LOG_ABIERTO);
-    // al terminar un op: recargar lo que el op escribe (evaluaciones, datos)
-    if (OCUPADO && !s.ops.op) { cargarDatos(); cargarEvaluaciones(); }
+    // al terminar un op: recargar lo que el op escribe (evaluaciones, datos,
+    // modelos — y el registro del Lab, por si el Lab corrio tandas nuevas)
+    if (OCUPADO && !s.ops.op) { cargarDatos(); cargarModelos(); cargarEvaluaciones(); cargarLaboratorio(); }
     OCUPADO = !!s.ops.op;
   } catch (e) {
     document.getElementById("updated").textContent = "status no disponible: " + e;
@@ -453,6 +458,70 @@ function renderDatos(d) {
     <table><thead><tr><th>Versión</th><th class="num">Filas</th></tr></thead>
     <tbody>${Object.entries(vpd).map(([v, n]) =>
       `<tr><td>${esc(v)}</td><td class="num">${fmt(n)}</td></tr>`).join("")}</tbody></table>` : "";
+}
+
+// ========================================================== PANEL 2: LABORATORIO
+const ENC_LABEL = {te: "TE", te_extra: "TE + nativo", frecuencia: "frecuencia",
+                   nativo: "nativo"};
+
+async function cargarLaboratorio() {
+  try { renderLaboratorio(await (await fetch("/laboratorio")).json()); } catch (e) {}
+}
+
+function renderLaboratorio(doc) {
+  const kpis = document.getElementById("lab-kpis");
+  const caja = document.getElementById("lab-lineas");
+  if (!doc?.disponible) {
+    kpis.innerHTML = "";
+    caja.innerHTML = `
+      <div class="vacio">El registro del Lab no está disponible — se lee de
+      <code>../Nueva_Licitaciones_Lab/experimentos/</code> (mismo padre que este repo).</div>`;
+    return;
+  }
+  const reg = doc.registro || {};
+  kpis.innerHTML = [
+    {label: "campeones promovidos", value: "6",
+     delta: "2 conjuntos × num · zero · discount"},
+    {label: "corridas del registro", value: fmt(reg.entradas),
+     delta: "append-only: los caminos sin salida también cuentan"},
+    {label: "última corrida", value: (reg.ultima || "").slice(0, 10),
+     delta: (reg.ultima || "").slice(11, 16) + " — ts del registro del Lab"},
+  ].map(t => `<div class="tile"><div class="label">${esc(t.label)}</div>
+      <div class="value">${esc(t.value)}</div><div class="delta">${esc(t.delta)}</div></div>`).join("");
+
+  const html = [];
+  for (const [ds, lineas] of Object.entries(doc.campeones || {})) {
+    const rows = Object.entries(lineas).map(([linea, m]) => {
+      const esZd = m.metrica === "auc";
+      const test = esZd
+        ? `AUC ${m.test?.auc ?? "—"} · LL ${m.test?.logloss ?? "—"}`
+        : `MAE ${m.test?.mae ?? "—"}`;
+      const val = esZd ? `AUC ${m.val?.auc ?? "—"}` : `MAE ${m.val?.mae ?? "—"}`;
+      const base = m.mejor_baseline_test != null
+        ? `Δ ${esZd ? "LL" : "MAE"} vs mejor baseline: ${m.mejor_baseline_test}` : "";
+      return `<tr>
+        <td>${esc(linea)}</td>
+        <td class="sub" title="${esc(m.name)}">${esc(m.name)}</td>
+        <td class="sub">${esc(m.encoding)}</td>
+        <td class="sub">d${m.hp?.max_depth} · lr ${m.hp?.eta} · ${esc(m.hp?.objective?.replace("reg:absoluteerror", "MAE").replace("binary:logistic", "logistic"))}</td>
+        <td class="num">${fmt(m.best_it)}</td>
+        <td class="num">${m.n_features}</td>
+        <td class="sub">${esc(m.device)}</td>
+        <td class="sub">${esc(test)}<br><span class="sub">${esc(val)} (val)</span></td>
+        <td class="num" title="${esc(base)}">${fmt(m.n_corridas)}</td></tr>`;
+    }).join("");
+    html.push(`
+      <h2>${esc(ds)}</h2>
+      <table>
+        <thead><tr>
+          <th>Línea</th><th>Campeón (experimento)</th><th>Encoding órgano</th>
+          <th>Receta</th><th class="num">best_it</th><th class="num">Feats</th>
+          <th>Dev</th><th>Test (protocolo del Lab)</th><th class="num">Corridas</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+  }
+  caja.innerHTML = html.join("");
 }
 
 // ============================================================ PANEL 3: HISTÓRICO
@@ -579,19 +648,20 @@ function renderExpuestoKpis(s) {
 function renderModelos(doc) {
   const html = [];
   const HP_LABEL = {objective: "obj", eval_metric: "métrica", max_depth: "d",
-                    learning_rate: "lr", subsample: "sub", colsample_bytree: "colbt",
-                    min_child_weight: "mcw", scale_pos_weight: "spw", n_estimators: "est"};
+                    learning_rate: "lr", n_estimators: "est", device: "dev",
+                    random_state: "seed", n_jobs: "jobs"};
   for (const [ds, lineas] of Object.entries(doc.lineas || {})) {
     const rows = Object.entries(lineas).map(([linea, m]) => {
       const hp = Object.entries(m.hp || {})
         .filter(([, v]) => v != null)
         .map(([k, v]) => `${HP_LABEL[k] || k} ${v}`).join(" · ");
+      const enc = m.encoding ? ` · ${ENC_LABEL[m.encoding] || m.encoding}` : "";
       return `<tr>
         <td>${esc(linea)}</td>
         <td class="num">${fmt(m.sizes?.train)}</td>
         <td class="sub">${esc((m.val_window || []).join(" … "))}</td>
         <td class="num">${fmt(m.rounds)}</td>
-        <td class="num">${m.n_features}${m.te ? " +TE" : ""}</td>
+        <td class="num">${m.n_features}${esc(enc)}</td>
         <td class="sub">${esc(hp)}</td>
         <td class="num">${m.tam_ubj_mb}</td></tr>`;
     }).join("");
@@ -789,6 +859,7 @@ function toggleTable(id) {
 refresh();
 cargarDatos();
 cargarModelos();
+cargarLaboratorio();
 cargarEvaluaciones();
 setInterval(refresh, 10000);
 </script>

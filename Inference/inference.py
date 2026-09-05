@@ -7,18 +7,17 @@
 #
 #Receta por conjunto (licitaciones | menores), con los boosters + metas de
 #Models/ (contrato de servido del BUILDLOG):
-#   1. featurizar con las funciones de Modeling/featurer.py — mismo codigo que
-#      en entrenamiento, sin copia. row_missing_count se recalcula contando
-#      solo raw+calidad: los objetivos, presentes en entrenamiento, serian NaN
-#      sistematicos (+2/3) en todo lo servido;
-#   2. hist_volume_*: recuentos prior-ano de la tabla train (features.parquet)
-#      reindexados a las filas recibidas — replica exacta de lo que vio el
-#      entrenamiento (segmento nuevo -> NaN);
-#   3. matriz por linea segun el meta: features en orden, TE por mapas (nivel
-#      nuevo -> gmean), categoricas con niveles congelados (nuevo -> missing),
-#      resto float32;
-#   4. num -> expm1 + clip [0,50]; zd -> prob; disc -> clip [0,70];
-#   5. router: zero_discount_pred = prob >= UMBRAL_ZERO_DISCOUNT[conjunto];
+#   1. featurizar con Modeling/featurer.py (la capa f_* del Lab) — mismo
+#      codigo que en entrenamiento, sin copia y sin dependencia de Data/:
+#      las features no aprenden de la tabla train (los hist_volume_* murieron
+#      con el Lab viejo);
+#   2. matriz por linea segun el meta: features en orden, encoding del organo
+#      por mapas (TE: nivel nuevo/nulo -> prior; frecuencia: -> NaN),
+#      categoricas con niveles congelados por orden de aparicion (nuevo ->
+#      missing), resto float32;
+#   3. num -> clip [0,50]; zd -> prob; disc -> clip [0,70] (sin transform:
+#      los campeones del Lab regresan el objetivo directo);
+#   4. router: zero_discount_pred = prob >= UMBRAL_ZERO_DISCOUNT[conjunto];
 #      system = 0 donde zd_pred, si no discount. version = max(meta['creado'])
 #      de las 6 lineas: identifica el modelo que predijo.
 
@@ -47,21 +46,16 @@ STEMS = {  # conjunto -> (num_ofertas, zero_discount, discount) en Models/
     "menores": ("menores_num_ofertas", "menores_zero_discount", "menores_discount"),
 }
 
-# Umbral del router zero_discount -> 0 por conjunto: el que minimiza el MAE del
-# sistema con gate sobre la ventana VAL de features.parquet, derivado el
-# 2026-09-02 con los boosters de produccion (curva plana alrededor del optimo):
-#   licitaciones 0.475: MAE 6.14 -> 5.96 (precision_zero 0.90, recall_zero 0.93)
-#   menores      0.585: MAE 1.18 -> 1.15 (precision_zero 0.98, recall_zero 0.98)
-UMBRAL_ZERO_DISCOUNT = {"licitaciones": 0.475, "menores": 0.585}
+# Umbral del router zero_discount -> 0 por conjunto: el que minimiza el MAE
+# del sistema con gate sobre la ventana VAL, derivado con los boosters de
+# produccion (curva plana alrededor del optimo). Valores vigentes derivados
+# el 2026-09-05 con los campeones de Nueva_Licitaciones_Lab:
+#   licitaciones 0.365: MAE 7.09 -> 7.07 (precision_zero 0.87, recall_zero 0.90)
+#   menores      0.555: MAE 1.26 -> 1.24 (precision_zero 0.97, recall_zero 0.98)
+UMBRAL_ZERO_DISCOUNT = {"licitaciones": 0.365, "menores": 0.555}
 
 PREDS = ["num_ofertas_pred", "zero_discount_prob", "zero_discount_pred",
          "discount_pct_pred", "system_discount_pct_pred"]
-
-# Segmentos de los hist_volume_* por conjunto (los de FEATURES_LINEA).
-SEGS_HIST = {
-    "licitaciones": [["nuts3"], ["cpv_division"], ["procedimiento_code"]],
-    "menores": [["nuts3"], ["cpv_division"], ["tipo_contrato_code"]],
-}
 
 
 # ---------------------------------------------------------------------------
@@ -74,61 +68,27 @@ def version_modelos(models_dir: Path) -> str:
     return max(m["creado"] for m in metas)
 
 
-def cargar_hist_base(feats_path: Path, conjunto: str) -> dict[str, pd.Series]:
-    """Serie prior-ano por segmento (indice segs+ano de la tabla train).
-
-    Replica add_prior_year_volumes de featurer sobre features.parquet: para
-    cada combinacion (segmento, ano), cuantas filas train del segmento tienen
-    ano menor.
-    """
-    segs = SEGS_HIST[conjunto]
-    unicos = sorted({s for seg in segs for s in seg})
-    base = pd.read_parquet(feats_path, columns=["ano"] + unicos,
-                           filters=[("conjunto", "=", conjunto)])
-    for c in unicos:
-        base[c] = base[c].astype("string")
-    out = {}
-    for seg in segs:
-        g = base.groupby(seg + ["ano"], observed=True).size()
-        out["hist_volume_" + seg[0]] = g.groupby(level=seg).cumsum() - g
-    return out
-
-
-def aplicar_hist(fe: pd.DataFrame, hist: dict[str, pd.Series]) -> pd.DataFrame:
-    """Sobrescribe los hist_volume_* con los recuentos de la tabla train.
-
-    featurizar_conjunto los calculo dentro del conjunto recibido (escala
-    equivoca en un serve pequeño); aqui se sustituyen por la base train.
-    """
-    fe = fe.copy()
-    for name, prior in hist.items():
-        seg = list(prior.index.names)
-        keys = fe[seg].copy()
-        for c in seg[:-1]:
-            keys[c] = keys[c].astype("string")
-        idx = pd.MultiIndex.from_frame(keys)
-        fe[name] = pd.to_numeric(prior.reindex(idx).to_numpy(), errors="coerce")
-        # En entrenamiento el recuento se calculaba pre-cast: segmento NaN ->
-        # fuera del groupby -> hist NaN. Post-cast ese NaN es "missing" y el
-        # reindex rescataria el recuento de un bucket que no existia en train;
-        # se enmascara para replicar exactamente.
-        na_seg = (fe[seg].astype("string") == "missing").any(axis=1).to_numpy()
-        fe.loc[na_seg, name] = np.nan
-    return fe
-
-
 def matriz_linea(fe: pd.DataFrame, meta: dict) -> pd.DataFrame:
-    """X segun el contrato del meta (features en orden, TE por mapas,
-    categoricas con niveles congelados, resto float32)."""
-    te = meta.get("target_encoding")
-    X = pd.DataFrame(index=fe.index)
-    for c in meta["features"]:
-        if te and c.endswith("_te"):
-            raw = c[:-3]
-            X[c] = (fe[raw].astype("string").map(te["maps"][raw])
-                    .fillna(te["gmean"]).astype("float32"))
-        else:
-            X[c] = fe[c]
+    """X segun el contrato del meta: features en orden, organo por su encoding
+    (mapas del meta), categoricas con niveles congelados, resto float32."""
+    enc = meta.get("encoding_organo") or {}
+    # columnas crudas en el orden del meta (la sintetica del organo no esta en
+    # fe; se anade despues EN SU SITIO: te/frecuencia sobrescriben la cruda,
+    # f_organo_te va al final, su posicion en la lista del campeon).
+    X = fe[[c for c in meta["features"] if c in fe.columns]].copy()
+    tipo = enc.get("tipo")
+    if tipo in ("te", "frecuencia"):
+        s = fe[enc["columna"]].astype("string")
+        if tipo == "te":
+            X[enc["columna"]] = (s.map(enc["maps"]).fillna(enc["prior"])
+                                 .astype("float32"))
+        else:  # frecuencia: no vistos/nulos -> NaN, sin fill
+            X[enc["columna"]] = s.map(enc["maps"]).astype("float32")
+    elif tipo == "te_extra":
+        s = fe[enc["columna"]].astype("string")
+        X["f_organo_te"] = (s.map(enc["maps"]).fillna(enc["prior"])
+                            .astype("float32"))
+
     for c, niveles in meta["categorical_levels"].items():
         s = X[c].astype("string")
         X[c] = pd.Categorical(s.where(s.isin(niveles)), categories=niveles)
@@ -141,12 +101,15 @@ def matriz_linea(fe: pd.DataFrame, meta: dict) -> pd.DataFrame:
 def predecir_linea(fe: pd.DataFrame, models_dir: Path, stem: str) -> np.ndarray:
     """Prediccion final (transform + clip del meta) de una linea."""
     meta = json.loads((models_dir / f"{stem}.meta.json").read_text())
-    te = meta.get("target_encoding")
-    faltan = [c if not (te and c.endswith("_te")) else f"{c} (desde {c[:-3]})"
-              for c in meta["features"]
-              if (c[:-3] if (te and c.endswith("_te")) else c) not in fe.columns]
-    if faltan:
-        raise ValueError(f"{meta['linea']}: faltan features {faltan} — "
+    enc = meta.get("encoding_organo") or {}
+    tipo = enc.get("tipo")
+    # columna que sintetiza matriz_linea desde la cruda del organo (si la hay)
+    sintetica = ("f_organo_te" if tipo == "te_extra"
+                 else enc.get("columna") if tipo in ("te", "frecuencia") else None)
+    faltan = [c for c in meta["features"]
+              if c not in fe.columns and c != sintetica]
+    if faltan or (sintetica and enc["columna"] not in fe.columns):
+        raise ValueError(f"{meta['linea']}: faltan features {faltan or enc['columna']} — "
                          "¿la entrada salio de scrape.py?")
 
     bst = xgb.Booster()
@@ -156,7 +119,7 @@ def predecir_linea(fe: pd.DataFrame, models_dir: Path, stem: str) -> np.ndarray:
     gc.collect()
 
     pred = np.asarray(pred, dtype=np.float64)
-    if meta["transform"] == "log1p":
+    if meta["transform"] == "log1p":     # ningun campeon del Lab lo usa
         pred = np.expm1(pred)
     lo, hi = meta["clip"] or (-np.inf, np.inf)
     return np.clip(pred, lo, hi)
@@ -165,29 +128,17 @@ def predecir_linea(fe: pd.DataFrame, models_dir: Path, stem: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Servido de un conjunto de filas
 # ---------------------------------------------------------------------------
-def featurizar_servido(sub: pd.DataFrame, conjunto: str,
-                       feats_path: Path) -> pd.DataFrame:
-    """Filas raw de un conjunto -> tabla de features de servido (pasos 1-2)."""
+def featurizar_servido(sub: pd.DataFrame, conjunto: str) -> pd.DataFrame:
+    """Filas raw de un conjunto -> tabla de features de servido."""
     sub = sub.reset_index(drop=True)
-    sub["ano"] = featurer.fix_ano(sub["ano"]).round().astype("Int64")
     try:
-        fe = featurer.featurizar_conjunto(sub, conjunto)
+        return featurer.featurizar_conjunto(sub, conjunto)
     except KeyError as e:
         raise ValueError(f"falta la columna raw {e} — la entrada debe salir "
                          "de scrape.py") from e
 
-    # row_missing_count contando solo las columnas de entrada (sin objetivos):
-    # en entrenamiento los objetivos, presentes, aportaban 0; a NaN en servido
-    # sumarian +2/3 sistematicos en toda fila.
-    conteo = [c for c in sub.columns
-              if c not in featurer.OBJETIVOS + ["ml_estado"] + PREDS + ["version"]]
-    rmc = sub[conteo].isna().sum(axis=1).astype("float64")
-    fe["row_missing_count"] = rmc.to_numpy()
-    return aplicar_hist(fe, cargar_hist_base(feats_path, conjunto))
 
-
-def inferir(df: pd.DataFrame, models_dir: Path = Path("Models"),
-            feats_path: Path = Path("Data/features.parquet")) -> pd.DataFrame:
+def inferir(df: pd.DataFrame, models_dir: Path = Path("Models")) -> pd.DataFrame:
     """Filas raw (+calidad, columna 'conjunto') -> mismas filas + PREDS + version.
 
     Se sirve toda fila recibida (sin filtro de poblacion: en servido no hay
@@ -200,9 +151,6 @@ def inferir(df: pd.DataFrame, models_dir: Path = Path("Models"),
     desconocidos = set(df["conjunto"].dropna().unique()) - set(STEMS)
     if desconocidos:
         raise ValueError(f"conjuntos desconocidos: {sorted(desconocidos)}")
-    if not feats_path.exists():
-        raise ValueError(f"no existe {feats_path}: es la base de los hist_volume "
-                         "(regenerar con Modeling/featurer.py)")
 
     df = df.drop(columns=[c for c in PREDS + ["version"] if c in df.columns])
     version = version_modelos(models_dir)
@@ -210,7 +158,7 @@ def inferir(df: pd.DataFrame, models_dir: Path = Path("Models"),
     partes = []
     for conjunto, sub in df.groupby("conjunto", observed=True):
         sub = sub.reset_index(drop=True)
-        fe = featurizar_servido(sub, conjunto, feats_path)
+        fe = featurizar_servido(sub, conjunto)
 
         stem_num, stem_zd, stem_disc = STEMS[conjunto]
         num = predecir_linea(fe, models_dir, stem_num)
@@ -241,8 +189,6 @@ def main() -> None:
     p.add_argument("--input", required=True, help="parquet raw (+INT) con columna 'conjunto'")
     p.add_argument("--salida", default=None, help="parquet de salida (default: <input>_preds.parquet)")
     p.add_argument("--models-dir", default="Models")
-    p.add_argument("--feats", default="Data/features.parquet",
-                   help="tabla train: base de los hist_volume")
     args = p.parse_args()
 
     entrada = Path(args.input)
@@ -250,7 +196,7 @@ def main() -> None:
         raise SystemExit("la entrada debe ser un parquet")
     salida = Path(args.salida) if args.salida else entrada.with_name(entrada.stem + "_preds.parquet")
 
-    res = inferir(pd.read_parquet(entrada), Path(args.models_dir), Path(args.feats))
+    res = inferir(pd.read_parquet(entrada), Path(args.models_dir))
     res.to_parquet(salida, index=False, compression="snappy")
     print(f"escrito: {salida}  ({len(res):,} filas x {res.shape[1]} columnas)")
 

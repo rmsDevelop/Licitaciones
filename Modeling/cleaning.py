@@ -1,7 +1,8 @@
 #Clasifica las filas de licitaciones.parquet rellenando ml_estado: 'train' |
-#'filtered' | null (abierta). Criterios portados de Licitaciones-Lab
-#(02_cleaning.py de las seis lineas): ventana 2021+, fix_ano, y por conjunto
-#las condiciones de objetivo. Una fila es 'train' si sirve para ALGUNO de los
+#'filtered' | null (abierta). Criterios compartidos con Nueva_Licitaciones_Lab
+#(cleaning.py; la union de sus ok_* == ml_estado=='train' con paridad exacta
+#verificada el 2026-09-04): ventana 2021+, fix_ano, y por conjunto las
+#condiciones de objetivo. Una fila es 'train' si sirve para ALGUNO de los
 #tres modelos de su conjunto (num_ofertas 0..50 registrado, o discount/zero_
 #discount derivable en [0, 70] con importes sanos). Se ejecuta tras la
 #evaluacion: toda fila valida pasa a 'train' (sin reserva de test); el split
@@ -20,7 +21,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 # ---------------------------------------------------------------------------
-# Criterios (Licitaciones-Lab)
+# Criterios (compartidos con Nueva_Licitaciones_Lab)
 # ---------------------------------------------------------------------------
 # Rango de sanidad del raw `ano` tras reparar el bug de anno a dos digitos
 # (22 -> 2022). El techo es el ano en curso: la version del Lab lo congelaba

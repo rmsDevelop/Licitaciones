@@ -13,12 +13,13 @@ sesión a sesión — decisiones, bugs y verificaciones — vive en
 - `Scraper/update.py` — refresco incremental de los últimos N meses;
   marca `test` a la adjudicación recién llegada (protocolo del ciclo).
 - `Modeling/` — `cleaning.py` (clasifica `ml_estado`) · `featurer.py`
-  (`Data/features.parquet`, unión de features del Lab) · `training.py`
-  (6 líneas xgboost → `Models/`).
-- `Inference/` — `inference.py` (servido a demanda + router) ·
-  `evaluate.py` (evaluación del expuesto sobre las filas test).
+  (`Data/features.parquet`: 19 features `f_*` del Lab) · `training.py`
+  (6 líneas xgboost con las recetas campeonas del Lab → `Models/`).
+- `Inference/` — `inference.py` (servido a demanda + router, sin dependencia
+  de `Data/`) · `evaluate.py` (evaluación del expuesto sobre las filas test).
 - `api.py` + `Dashboard/` — API localhost de operación: todo el pipeline
-  corre como op subprocess single-flight, incluido el ciclo completo.
+  corre como op subprocess single-flight, incluido el ciclo completo;
+  `GET /laboratorio` expone los campeones promovidos del Lab.
 
 ## Operativa
 

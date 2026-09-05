@@ -608,11 +608,144 @@ continuación el **primer ciclo completo por la API** (31,5 min):
 
 ---
 
-## Pendiente (orden propuesto, a consensuar)
+## 2026-09-05 — Puerto de los campeones de Nueva_Licitaciones_Lab
+
+**Estado: HECHO.** El puerto a mano que el charter del Lab define: sus
+campeones (BUILDLOG sesión 9, 86 corridas registradas) traducidos a las
+constantes de `Modeling/`, el panel «Laboratorio» del dashboard poblado con
+su registro (pendiente #2 de este BUILDLOG), y el run real completo que
+estrenó los modelos nuevos. Versión expuesta:
+**2026-09-05T11:27:41Z**.
+
+### Campeones promovidos (specs en `experimentos/` del Lab)
+
+| Línea | Experimento | Encoding órgano | Receta | best_it Lab |
+|---|---|---|---|---|
+| lic/num | `xgb_d8_eta01_mae_teorg_m100_t3` | TE m=100 (reemplaza) | absoluteerror d8/eta0.1, 18 feats | 389 |
+| lic/zd | `xgb_d8_eta01_freqorg_t3` | frecuencia de train (reemplaza) | binary d8/eta0.1, 18 feats | 384 |
+| lic/disc | `xgb_d8_eta01_mae_teorg_m20_clip_t3` | TE m=20 (reemplaza) | absoluteerror d8/eta0.1 + clip | 394 |
+| men/num | `xgb_d8_mae_teorg_m20nat` | TE m=20 extra (`f_organo_te`) + nativo | absoluteerror d8/eta0.3, 13 feats | 256 |
+| men/zd | `xgb_d6_t3` | nativo | binary d6/eta0.3, 17 feats | 158 |
+| men/disc | `xgb_d10_mae_teorg_m20_t3` | TE m=20 (reemplaza) | absoluteerror d10/eta0.3, 17 feats | 195 |
+
+Comunes: `hist`, seed 42, n_jobs 6, early stopping 30 rondas sobre VAL.
+Desaparecen los HPs del puerto viejo (subsample/colsample/mcw/reg_lambda) y
+todo `scale_pos_weight`. **Población sin cambios**: la unión `ok_*` del Lab
+== `ml_estado=='train'` (paridad exacta verificada por el Lab), y el filtro
+por objetivo válido de training reproduce `ok_*` por línea — `cleaning.py`
+solo cambió comentarios.
+
+### Orden de sesión: el prepromote necesita el código VIEJO
+
+`evaluate.py` corre como subprocess e importa `featurer.py` del repo: editado
+el código, la evaluación de cierre del modelo saliente rompería (metas viejas
+↔ featurer nuevo). Por eso el run fue: **update + evaluar prepromote con el
+código anterior** (cierra el modelo 2026-09-03) → swap de código → cleaning →
+featurer → training → umbrales.
+
+### `Modeling/featurer.py` — reescritura (19 `f_*`)
+
+Puerto literal de `featuring.py::derivar` (mismas fórmulas, mismos nombres
+`f_*`, mismos tipos Arrow — `FEAT_SCHEMA`): muere todo lo del Lab viejo
+(harden 1e9, cap 10 del ratio, keywords, hist_volume_*, row_missing_count,
+INT-*, fillna("missing"), drops por varianza). `featurizar_conjunto(df,
+conjunto)` conserva la firma (la sigue usando inference.py sin copia);
+`FEATURES_LINEA` nueva = la selección por línea de los campeones; `TIPOS`
+(num|cat) es el contrato compartido con training. features.parquet:
+**3.517.822 × 26** (4 claves + 3 objetivos + 19 f_*), licitaciones primero.
+
+### `Modeling/training.py` — las 6 recetas
+
+`LINEAS` con los campeones (encoding del órgano por línea: `te` m100 / `frecuencia`
+/ `te` m20 / `te_extra` m20 / `nativo` / `te` m20). El TE es el del Lab —
+`te(g) = (n_g·media_g + m·prior)/(n_g + m)` — con la **sonda** en su régimen
+exacto: TRAIN con valores OOF (K=5, rng seed 42), VAL con el mapa full-train
++ prior. **Rounds = best_iteration + 1 exacto** (fuera el buffer +50).
+Categorías fit-on-train **por orden de aparición** (no `sorted()`), código
+−1 → NaN. Meta: mismas claves; `target_encoding` → **`encoding_organo`**
+`{tipo, columna, m, prior, maps}`; `transform` siempre None (num directo,
+sin log1p → adiós expm1 en servido).
+
+Divergencias conscientes y documentadas: el refit de producción (que el Lab
+no hace, sin artefactos) usa el **mapa TE re-fit sobre train+val** — el mismo
+que va al meta, consistencia booster↔servido; la auto-inclusión queda
+acotada por el suavizado y los rounds se congelaron con la sonda OOF. GPU
+uniforme (el campeón men/num corrió en CPU; desplazamiento +0,2–0,4%
+documentado en el Lab, aceptado). El clip num [0,50] en servido es política
+del motor (el Lab no clipea num).
+
+### `Inference/` — servido sin `Data/`
+
+Sin hist_volume_* ni row_missing_count, **`inferir()` deja de necesitar
+features.parquet** (fuera `feats_path`, `cargar_hist_base`, `aplicar_hist`,
+`SEGS_HIST`, `--feats` y el header `X-Caveat`): el servido queda firme sin
+`Data/` (verificado sirviendo con el parquet apartado). `matriz_linea`
+resuelve el órgano según `encoding_organo.tipo` (TE → prior; frecuencia →
+NaN sin fill; te_extra → sintetiza `f_organo_te`; nativo → niveles).
+evaluate.py solo cambió de firma.
+
+### api.py + Dashboard — `GET /laboratorio` y panel
+
+`PROMOVIDOS_LAB` (constante de api.py: el registro del Lab NO marca
+campeones, el puerto a mano actualiza la constante) + `LAB_DIR` →
+`GET /laboratorio` lee los 6 `*.trainings.json` (cache por mtime): por línea
+el campeón (receta, encoding, best_it, device, métricas val/test del
+protocolo del Lab, mejor baseline) + resumen del registro. Panel
+«Laboratorio» poblado (KPIs + tabla por conjunto); `/modelos` muestra el
+encoding del órgano en la columna Features y la hp nueva (device/seed/jobs).
+
+### El run real (vía API, orden prepromote-primero)
+
+| paso | resultado |
+|---|---|
+| update `--meses 2` | 3.631.481 filas (+242): lic 157 nuevos/1.877 cambiados/**488 test** · men 85/11/**85 test** |
+| evaluar prepromote | **cierre del modelo 2026-09-03** sobre 573 test (568 evaluables): lic system MAE **9,93** (num 1,36 · AUC-PR 0,783 · disc 10,10) · men **5,61** (0,69 · 0,913 · 5,62) — segunda línea del histórico |
+| cleaning | pliegue test→0; totales por conjunto intactos |
+| featurer | features.parquet 3.517.822 × 26 (19 f_*) |
+| training | 6 líneas, ~4 min GPU: rounds **385/473/550/587/256/184** (lic/num y men/disc cerca de los best_it del Lab; el resto difiere por la ventana VAL as-of hoy vs as-of M del Lab) |
+| umbrales | re-derivados sobre VAL: **lic 0,475→0,365** (system MAE 7,09→7,07 · P/R zero 0,87/0,90) · **men 0,585→0,555** (1,26→1,24 · 0,97/0,98), curvas planas; uvicorn reiniciado (la constante se lee al importar) |
+
+Modelos: ~710 MB totales (antes ~4,6 GB); el mayor men/num 528 MB (órgano
+nativo 16.940 niveles, 587 rounds d8). Referencia VAL con los boosters
+nuevos (optimista por diseño — VAL entra en el refit): lic num MAE 1,04 · zd
+AUC-PR 0,956 · disc 7,50 · system 7,07 | men 0,22 · 0,997 · 1,25 · 1,24. El
+cierre real del modelo nuevo llegará con el próximo ciclo.
+
+### Verificación
+
+- **Paridad de oro del featurer**: join por id (3,5M filas) contra el
+  parquet del Lab — **0 diffs inesperados** en las 19 columnas; los únicos
+  diffs caen en las 821/1.167 filas cuyo raw refrescó PLACSP tras la siembra
+  del Lab (clasificadas por `fecha_updated`). Idempotencia bit a bit
+  (segunda corrida `equals`).
+- **Poblaciones exactas** vs Lab: lic num 756.864 · men num 2.760.165 · men
+  disc 2.711.647 idénticos; lic disc 608.466 = 608.462 + 4 filas nuevas del
+  update. `zero_discount.notna() == discount_pct.notna()` y zd=1 ⇔ disc=0.
+- **Training smoke al 5%** en sandbox: las 6 líneas encadenan
+  sonda→rounds→refit→meta; metas coherentes con `LINEAS` (feats
+  18/18/18/13/17/17, encodings, clips, prior/mapas plausibles).
+- **Contrato de servido**: featurize de servido == tabla train (2k filas por
+  conjunto, exacto); preds sanas y deterministas; matriz float32 ==
+  float64 en preds (0.0e+00 de diferencia); órgano no visto → prior (TE) /
+  NaN (frecuencia/nativo).
+- **API/dashboard**: `/laboratorio` con el registro real (86 entradas, 6
+  campeones), `/modelos` con la receta nueva, `/inferir` 200 filas smoke
+  (versión nueva en headers, gate consistente, sin X-Caveat) y **firmeza
+  sin `Data/features.parquet`**; `node --check` + smoke DOM del panel nuevo
+  (KPIs, tablas, camino vacío) y del expuesto con el meta nuevo.
+- Bug del puerto cazado por la verificación: `matriz_linea` sintetizaba la
+  columna del órgano fuera de posición y XGBoost rechazaba el orden de
+  features — corregido construyendo X en el orden del meta y sobrescribiendo
+  in-place. (Y un `max(None, …)` en `_laboratorio` que la primera petición
+  en vivo cazó.)
+
+### Pendiente (orden propuesto, a consensuar)
 
 1. Flujo operativo de preds — persistir lo servido en
    `licitaciones.parquet` (el merge de preds que el BUILDLOG de
    inference.py deja al llamador: qué filas se sirven, cuándo y con qué
    versión).
-2. Panel Laboratorio — poblarlo con información de
-   `../Licitaciones-Lab` cuando haya algo que recoger.
+2. Umbrales del router derivados por ciclo — hoy son un one-off por sesión;
+  automatizar su re-derivación tras cada training (opción evaluada y
+  descartada esta sesión por alcance; el BUILDLOG de la próxima promoción
+  decide).

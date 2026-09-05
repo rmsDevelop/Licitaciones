@@ -14,6 +14,8 @@
 #                        los 600 MB
 #  GET  /modelos         metas de las 6 lineas expuestas + umbrales del router
 #                        (nunca los boosters)
+#  GET  /laboratorio     campeones promovidos del Lab (experimentos/ de
+#                        ../Nueva_Licitaciones_Lab) + resumen del registro
 #  GET  /evaluaciones    estado_curso.json (modelo expuesto) + historico.jsonl
 #                        (modelos ya reemplazados)
 #  POST /ops/{op}        lanza un op en subprocess (un solo op a la vez):
@@ -56,8 +58,19 @@ from fastapi.responses import HTMLResponse, Response
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "Data"
 MODELS_DIR = ROOT / "Models"
-FEATS_PATH = DATA_DIR / "features.parquet"
 DASHBOARD = ROOT / "Dashboard" / "dashboard.html"
+# El registro de experimentos del Lab (leido por GET /laboratorio). El Lab NO
+# marca campeones en su registro: PROMOVIDOS_LAB es la constante del puerto a
+# mano — cada promocion la actualiza.
+LAB_DIR = ROOT.parent / "Nueva_Licitaciones_Lab" / "experimentos"
+PROMOVIDOS_LAB = {
+    "licitaciones/num_ofertas": "xgb_d8_eta01_mae_teorg_m100_t3",
+    "licitaciones/zero_discount": "xgb_d8_eta01_freqorg_t3",
+    "licitaciones/discount": "xgb_d8_eta01_mae_teorg_m20_clip_t3",
+    "menores/num_ofertas": "xgb_d8_mae_teorg_m20nat",
+    "menores/zero_discount": "xgb_d6_t3",
+    "menores/discount": "xgb_d10_mae_teorg_m20_t3",
+}
 
 sys.path.insert(0, str(ROOT / "Inference"))
 import inference  # noqa: E402  (version_modelos, UMBRAL_ZERO_DISCOUNT, inferir)
@@ -83,6 +96,7 @@ CICLO = ("update", "evaluar", "cleaning", "featurer", "training")
 
 _AGG_CACHE: dict = {}   # agregados del parquet (firma: mtime+tamano)
 _META_CACHE: dict = {}  # version expuesta (firma: mtimes de los 6 metas)
+_LAB_CACHE: dict = {}   # campeones del Lab (firma: mtimes de los 6 registros)
 
 
 def _ahora() -> str:
@@ -174,14 +188,71 @@ def _rec_linea(stem: str) -> dict:
         "linea": meta["linea"], "creado": meta["creado"], "target": meta["target"],
         "transform": meta["transform"], "clip": meta["clip"],
         "hp": {k: hp.get(k) for k in ("objective", "eval_metric", "max_depth",
-                                      "learning_rate", "subsample",
-                                      "colsample_bytree", "min_child_weight",
-                                      "scale_pos_weight", "n_estimators")},
+                                      "learning_rate", "n_estimators", "device",
+                                      "random_state", "n_jobs")},
         "rounds": meta["rounds"], "val_window": meta["early_stop_val_window"],
         "sizes": meta["sizes"], "n_features": len(meta["features"]),
-        "te": meta.get("target_encoding") is not None,
+        "encoding": (meta.get("encoding_organo") or {}).get("tipo"),
         "tam_ubj_mb": round((MODELS_DIR / f"{stem}.ubj").stat().st_size / 1e6, 1),
     }
+
+
+def _lab_stem(linea: str) -> str:
+    """licitaciones/num_ofertas -> experimentos/licitaciones_num_ofertas"""
+    return linea.replace("/", "_") + ".trainings.json"
+
+
+def _enc_label(name: str) -> str:
+    """Etiqueta corta del encoding del organo, derivada del name del experimento."""
+    if "teorg_m100nat" in name or "teorg_m20nat" in name:
+        return f"TE m={'100' if 'm100' in name else '20'} + nativo"
+    if "teorg_m100" in name:
+        return "TE m=100"
+    if "teorg_m20" in name:
+        return "TE m=20"
+    if "freqorg" in name:
+        return "frecuencia"
+    return "nativo"
+
+
+def _laboratorio() -> dict:
+    """Campeones promovidos + resumen del registro del Lab, cacheado por mtime."""
+    def calc() -> dict:
+        campeones: dict[str, dict] = {}
+        entradas, ts_todas = 0, []
+        for linea, name in PROMOVIDOS_LAB.items():
+            ruta = LAB_DIR / _lab_stem(linea)
+            reg = json.loads(ruta.read_text())
+            entradas += len(reg)
+            ts_todas.extend(e["ts"] for e in reg)
+            e = [x for x in reg if x["name"] == name][-1]  # ultima con ese name
+            alg = e["spec"]["algoritmo"]
+            p = alg["params"]
+            metrica = "auc" if "auc" in e["metricas"]["test"] else "mae"
+            # mejor baseline tonto en test (mae en regresion, logloss en zd)
+            bk = "logloss" if metrica == "auc" else "mae"
+            base = min((b[bk] for b in e["baselines"]["test"].values()
+                        if b.get(bk) is not None), default=None)
+            c, l = campeones.setdefault(linea.split("/")[0], {}), linea.split("/")[1]
+            c[l] = {
+                "name": name, "ts": e["ts"], "device": e["huella"]["device"],
+                "best_it": alg["best_iteration"],
+                "n_features": len(e["spec"]["features"]),
+                "encoding": _enc_label(name),
+                "hp": {k: p[k] for k in ("objective", "max_depth", "eta", "eval_metric")},
+                "val": e["metricas"]["val"], "test": e["metricas"]["test"],
+                "metrica": metrica, "mejor_baseline_test": base,
+                "n_corridas": len(reg),
+            }
+        return {"disponible": True,
+                "registro": {"entradas": entradas,
+                             "ultima": max(ts_todas) if ts_todas else None},
+                "campeones": campeones}
+
+    if not LAB_DIR.is_dir():
+        return {"disponible": False, "registro": None, "campeones": {}}
+    sig = tuple((LAB_DIR / _lab_stem(l)).stat().st_mtime_ns for l in PROMOVIDOS_LAB)
+    return _cache(sig, _LAB_CACHE, calc)
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +377,17 @@ def modelos() -> dict:
             "lineas": lineas}
 
 
+@app.get("/laboratorio")
+def laboratorio() -> dict:
+    """Los campeones del Lab promovidos a este motor + su registro.
+
+    La fuente es experimentos/ de ../Nueva_Licitaciones_Lab (append-only, el
+    BUILDLOG del Lab decide los campeones): PROMOVIDOS_LAB fija que experimento
+    se promociono en cada linea — el puerto a mano actualiza la constante.
+    """
+    return _laboratorio()
+
+
 @app.get("/evaluaciones")
 def evaluaciones() -> dict:
     """Lo registrado por Inference/evaluate.py en Data/evaluaciones/:
@@ -379,7 +461,7 @@ async def inferir(file: UploadFile = File(...)):
         # inferir() agrupa por conjunto: con 0 filas el concat final reventaria
         raise HTTPException(422, "el parquet no tiene filas")
     try:
-        res = inference.inferir(df, MODELS_DIR, FEATS_PATH)
+        res = inference.inferir(df, MODELS_DIR)
     except ValueError as e:
         raise HTTPException(409, str(e))
     buf = io.BytesIO()
@@ -389,8 +471,7 @@ async def inferir(file: UploadFile = File(...)):
                     headers={"Content-Disposition":
                              f'attachment; filename="{nombre}"',
                              "X-Modelo-Version": res["version"].iloc[0],
-                             "X-Filas": str(len(res)),
-                             "X-Caveat": "hist-volume-base-tabla-train"})
+                             "X-Filas": str(len(res))})
 
 
 @app.get("/", response_class=HTMLResponse)
