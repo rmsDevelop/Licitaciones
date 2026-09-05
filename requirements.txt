@@ -1,4 +1,4 @@
-# Nuevo_Licitaciones — runtime de Scraper/ + Modeling/ + Inference/ + api.py
+# Licitaciones — runtime de Scraper/ + Modeling/ + Inference/ + api.py
 # Recrear:  uv venv .venv --python 3.12 && uv pip install -r requirements.txt
 # Versiones pinadas al runtime probado (scrape 2026-09-01; training 2026-09-02;
 # api+dashboard 2026-09-02).

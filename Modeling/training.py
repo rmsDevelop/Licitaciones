@@ -1,6 +1,6 @@
 #Elabora los seis modelos {licitaciones,menores} x {num_ofertas,zero_discount,
 #discount} de forma secuencial, con GPU cuando este disponible. Recetas = los
-#campeones de Nueva_Licitaciones_Lab (BUILDLOG sesion 9; specs exactas en
+#campeones de Licitaciones-Lab (BUILDLOG sesion 9; specs exactas en
 #experimentos/*.trainings.json). Este archivo NO evalua (la evaluacion es
 #evaluate.py sobre filas test) ni enruta (el gate zero_discount->0 lo decide
 #quien sirva). Su unica salida son los boosters Models/<linea>.ubj + .meta.json.
@@ -43,7 +43,7 @@ from xgboost import XGBClassifier, XGBRegressor
 import featurer
 
 # ---------------------------------------------------------------------------
-# Configuracion de las seis lineas (campeones de Nueva_Licitaciones_Lab)
+# Configuracion de las seis lineas (campeones de Licitaciones-Lab)
 # ---------------------------------------------------------------------------
 ORGANO = "f_organo_contratante"     # la columna que codifica cada linea a su modo
 ORGANO_TE = "f_organo_te"           # columna sintetica del encoding te_extra
@@ -366,7 +366,7 @@ def run(data_dir: Path, models_dir: Path, solo: str | None, device: str) -> None
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Elaborar los seis modelos (campeones de Nueva_Licitaciones_Lab).")
+        description="Elaborar los seis modelos (campeones de Licitaciones-Lab).")
     p.add_argument("--data-dir", default="Data")
     p.add_argument("--models-dir", default="Models")
     p.add_argument("--solo", default=None, help="entrenar solo lineas que contengan este substring")

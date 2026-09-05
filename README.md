@@ -1,4 +1,4 @@
-# Nuevo_Licitaciones
+# Licitaciones
 
 Rehacer de `../Licitaciones` sin overengineering: la contratación pública
 española (licitaciones + contratos menores, sindicación PLACSP) como un

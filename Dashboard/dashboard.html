@@ -207,7 +207,7 @@
 <!-- ======================= PANEL 2: LABORATORIO ======================= -->
 <section id="panel-lab" role="tabpanel" aria-labelledby="tab-lab" hidden>
   <p class="panel-intro">
-    Los campeones de <code>../Nueva_Licitaciones_Lab</code> promovidos a este motor — el
+    Los campeones de <code>../Licitaciones-Lab</code> promovidos a este motor — el
     laboratorio de experimentación cuyo registro (<code>experimentos/*.trainings.json</code>,
     append-only) documenta cada corrida: población, features, receta y métricas val/test
     con su protocolo de ciclo simulado. La promoción es un puerto a mano: la constante
@@ -475,7 +475,7 @@ function renderLaboratorio(doc) {
     kpis.innerHTML = "";
     caja.innerHTML = `
       <div class="vacio">El registro del Lab no está disponible — se lee de
-      <code>../Nueva_Licitaciones_Lab/experimentos/</code> (mismo padre que este repo).</div>`;
+      <code>../Licitaciones-Lab/experimentos/</code> (mismo padre que este repo).</div>`;
     return;
   }
   const reg = doc.registro || {};

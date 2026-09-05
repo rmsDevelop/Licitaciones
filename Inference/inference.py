@@ -49,7 +49,7 @@ STEMS = {  # conjunto -> (num_ofertas, zero_discount, discount) en Models/
 # Umbral del router zero_discount -> 0 por conjunto: el que minimiza el MAE
 # del sistema con gate sobre la ventana VAL, derivado con los boosters de
 # produccion (curva plana alrededor del optimo). Valores vigentes derivados
-# el 2026-09-05 con los campeones de Nueva_Licitaciones_Lab:
+# el 2026-09-05 con los campeones de Licitaciones-Lab:
 #   licitaciones 0.365: MAE 7.09 -> 7.07 (precision_zero 0.87, recall_zero 0.90)
 #   menores      0.555: MAE 1.26 -> 1.24 (precision_zero 0.97, recall_zero 0.98)
 UMBRAL_ZERO_DISCOUNT = {"licitaciones": 0.365, "menores": 0.555}

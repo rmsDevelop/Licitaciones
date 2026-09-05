@@ -15,7 +15,7 @@
 #  GET  /modelos         metas de las 6 lineas expuestas + umbrales del router
 #                        (nunca los boosters)
 #  GET  /laboratorio     campeones promovidos del Lab (experimentos/ de
-#                        ../Nueva_Licitaciones_Lab) + resumen del registro
+#                        ../Licitaciones-Lab) + resumen del registro
 #  GET  /evaluaciones    estado_curso.json (modelo expuesto) + historico.jsonl
 #                        (modelos ya reemplazados)
 #  POST /ops/{op}        lanza un op en subprocess (un solo op a la vez):
@@ -62,7 +62,7 @@ DASHBOARD = ROOT / "Dashboard" / "dashboard.html"
 # El registro de experimentos del Lab (leido por GET /laboratorio). El Lab NO
 # marca campeones en su registro: PROMOVIDOS_LAB es la constante del puerto a
 # mano — cada promocion la actualiza.
-LAB_DIR = ROOT.parent / "Nueva_Licitaciones_Lab" / "experimentos"
+LAB_DIR = ROOT.parent / "Licitaciones-Lab" / "experimentos"
 PROMOVIDOS_LAB = {
     "licitaciones/num_ofertas": "xgb_d8_eta01_mae_teorg_m100_t3",
     "licitaciones/zero_discount": "xgb_d8_eta01_freqorg_t3",
@@ -381,7 +381,7 @@ def modelos() -> dict:
 def laboratorio() -> dict:
     """Los campeones del Lab promovidos a este motor + su registro.
 
-    La fuente es experimentos/ de ../Nueva_Licitaciones_Lab (append-only, el
+    La fuente es experimentos/ de ../Licitaciones-Lab (append-only, el
     BUILDLOG del Lab decide los campeones): PROMOVIDOS_LAB fija que experimento
     se promociono en cada linea — el puerto a mano actualiza la constante.
     """

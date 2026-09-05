@@ -1,5 +1,5 @@
 #Crea Data/features.parquet con las filas ml_estado=='train' (ambos conjuntos):
-#claves + los tres objetivos + las 19 features f_* de Nueva_Licitaciones_Lab
+#claves + los tres objetivos + las 19 features f_* de Licitaciones-Lab
 #(featuring.py, puerto literal de sus formulas — la verificacion de oro es un
 #join por id contra el parquet del Lab exigiendo igualdad exacta). La capa es
 #el conjunto CERRADO que training consume: cada linea selecciona las suyas de
