@@ -1,5 +1,6 @@
 #Clasifica las filas de licitaciones.parquet rellenando ml_estado: 'train' |
-#'filtered' | null (abierta). Criterios compartidos con Licitaciones-Lab
+#'filtered' | 'pre-2021' (fuera de ventana) | null (abierta). Criterios
+#compartidos con Licitaciones-Lab
 #(cleaning.py; la union de sus ok_* == ml_estado=='train' con paridad exacta
 #verificada el 2026-09-04): ventana 2021+, fix_ano, y por conjunto las
 #condiciones de objetivo. Una fila es 'train' si sirve para ALGUNO de los
@@ -31,6 +32,10 @@ ANO_SANITY_RANGE = (2000, date.today().year)
 # Ventana de modelizacion: regimen post-COVID estable (el Lab descarta 2020
 # por mezcla anormal de procedimientos).
 WINDOW_YEARS = (2021, date.today().year)
+
+# Estado de las filas fuera de ventana: separado de 'filtered' (en ventana,
+# objetivo invalido) para que el EDA sobre el raw completo las diferencie.
+ESTADO_PRE_VENTANA = f"pre-{WINDOW_YEARS[0]}"
 
 # Solo los expedientes resueltos/adjudicados tienen objetivo conocido
 # (licitaciones; en menores el feed ya es ~100% Resuelta y no se filtra).
@@ -75,11 +80,12 @@ def derivar_discount_pct(df):
 
 
 def clasificar_estado(df):
-    """Serie ml_estado ('train' | 'filtered' | NA=abierta) para un conjunto.
+    """Serie ml_estado ('train' | 'filtered' | 'pre-2021' | NA=abierta).
 
-    Precedencia: fuera de ventana -> 'filtered' (recorte de poblacion);
-    expediente abierto -> NA (aun sin objetivo, se clasificara cuando cierre);
-    cerrado en ventana -> 'train' si algun objetivo es valido, si no 'filtered'.
+    Precedencia: fuera de ventana -> 'pre-2021' (recorte de poblacion,
+    distinguible de las filtered en ventana); expediente abierto -> NA (aun
+    sin objetivo, se clasificara cuando cierre); cerrado en ventana ->
+    'train' si algun objetivo es valido, si no 'filtered'.
     """
     es_lic = df["conjunto"].iloc[0] == "licitaciones"
     ano = fix_ano(df["ano"]).round().astype("Int64")
@@ -100,7 +106,7 @@ def clasificar_estado(df):
     valida = (num_ok | money_ok).fillna(False).to_numpy(dtype=bool)
 
     estado = pd.Series(pd.NA, index=df.index, dtype="string")
-    estado[~en_ventana] = "filtered"
+    estado[~en_ventana] = ESTADO_PRE_VENTANA
     clasificable = en_ventana & cerrada
     estado[clasificable & valida] = "train"
     estado[clasificable & ~valida] = "filtered"
@@ -123,13 +129,10 @@ def run(data_dir: Path, dry_run: bool = False) -> None:
     for (conjunto, estado), n in resumen.items():
         print(f"  {conjunto:12s} {str(estado):8s} {n:>10,}")
 
-    # Diagnosticos de las filtered: fuera de ventana vs objetivo invalido.
-    ano = fix_ano(df["ano"]).round().astype("Int64")
-    en_ventana = ano.between(*WINDOW_YEARS).fillna(False)
-    fuera = (ml == "filtered") & ~en_ventana
-    invalido = (ml == "filtered") & en_ventana
-    print(f"  filtered: fuera de ventana {int(fuera.sum()):,} | "
-          f"objetivo invalido {int(invalido.sum()):,}")
+    # Diagnosticos de las no-train: fuera de ventana vs objetivo invalido.
+    print(f"  {ESTADO_PRE_VENTANA} (fuera de ventana): "
+          f"{int((ml == ESTADO_PRE_VENTANA).sum()):,} | "
+          f"filtered (objetivo invalido): {int((ml == 'filtered').sum()):,}")
 
     if dry_run:
         print("(dry-run: no se escribe)")
@@ -148,7 +151,8 @@ def run(data_dir: Path, dry_run: bool = False) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Clasificar ml_estado (train/filtered/abierta).")
+    p = argparse.ArgumentParser(
+        description="Clasificar ml_estado (train/filtered/pre-2021/abierta).")
     p.add_argument("--data-dir", default="Data", help="directorio con licitaciones.parquet")
     p.add_argument("--dry-run", action="store_true", help="informe sin escribir")
     args = p.parse_args()

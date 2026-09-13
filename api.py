@@ -12,6 +12,13 @@
 #  GET  /datos           analisis del parquet (paneles de Datos) — agregados
 #                        cacheados por mtime: el poll del dashboard no relee
 #                        los 600 MB
+#  GET  /eda             stats basicas + agregados por dimension del parquet
+#                        (panel EDA de Datos): ?conjunto=ambos|licitaciones|
+#                        menores · medias sobre poblacion evaluable
+#  GET  /eda/fig/{dim}   la figura de una dimension (ano|cpv|tipo) como SVG
+#                        matplotlib (Dashboard/graficas.py): barras = nº
+#                        licitaciones, lineas = descuento y ofertas medias ·
+#                        ?conjunto&tema=claro|oscuro · cacheada por mtime
 #  GET  /modelos         metas de las 6 lineas expuestas + umbrales del router
 #                        (nunca los boosters)
 #  GET  /laboratorio     campeones promovidos del Lab (experimentos/ de
@@ -72,7 +79,11 @@ PROMOVIDOS_LAB = {
     "menores/discount": "xgb_d10_mae_teorg_m20_t3",
 }
 
+sys.path.insert(0, str(ROOT / "Dashboard"))
 sys.path.insert(0, str(ROOT / "Inference"))
+sys.path.insert(0, str(ROOT / "Modeling"))
+import cleaning  # noqa: E402  (DISCOUNT_RANGE, NUM_OFERTAS_RANGE: poblacion evaluable del EDA)
+import graficas  # noqa: E402  (fig_eda + TEMAS: el render de /eda/fig)
 import inference  # noqa: E402  (version_modelos, UMBRAL_ZERO_DISCOUNT, inferir)
 
 CONJUNTOS = ("licitaciones", "menores")
@@ -97,6 +108,8 @@ CICLO = ("update", "evaluar", "cleaning", "featurer", "training")
 _AGG_CACHE: dict = {}   # agregados del parquet (firma: mtime+tamano)
 _META_CACHE: dict = {}  # version expuesta (firma: mtimes de los 6 metas)
 _LAB_CACHE: dict = {}   # campeones del Lab (firma: mtimes de los 6 registros)
+_EDA_CACHE: dict = {}   # agregados del EDA (firma: mtime+tamano+conjunto)
+_EDA_FIG_CACHE: dict = {}  # SVG del EDA por (dim, conjunto, tema) — firma mtime
 
 
 def _ahora() -> str:
@@ -117,15 +130,20 @@ app = FastAPI(title="nuevo_licitaciones", version="0.1.0", lifespan=_lifespan)
 # Cacheos por mtime: el dashboard pollea /status cada 10 s
 # ---------------------------------------------------------------------------
 def _cache(sig, cache: dict, fn):
-    """fn() cacheado mientras la firma (mtimes) no cambie."""
+    """fn() cacheado mientras la firma (mtimes) no cambie.
+
+    La firma se escribe solo si fn() tiene exito, y ya con el valor listo
+    (update atomico): ni un fallo envenena la cache ni un lector
+    concurrente ve la firma sin el valor.
+    """
     if cache.get("sig") != sig:
-        cache["sig"] = sig
-        cache["valor"] = fn()
+        valor = fn()
+        cache.update(sig=sig, valor=valor)
     return cache["valor"]
 
 
 def _agregados() -> dict:
-    """Analisis del parquet en memoria: universo, filas por ano, calidad.
+    """Analisis del parquet en memoria: universo y calidad.
 
     Lee solo las columnas del analisis (no los 600 MB enteros) y cachea por
     (mtime, tamano): releer solo cuando update.py reescribe el almecen.
@@ -138,38 +156,131 @@ def _agregados() -> dict:
 
         n_cols = pq.ParquetFile(p).metadata.num_columns
         df = pd.read_parquet(p, columns=["conjunto", "ml_estado", "version",
-                                         "fecha_publicacion", "score_calidad"])
-        conjuntos, por_ano = {}, {}
+                                         "score_calidad"])
+        conjuntos = {}
         for c in CONJUNTOS:
             g = df[df["conjunto"] == c]
             est = g["ml_estado"]
+            # pre-2021: fuera de la ventana de modelado, escrito por el
+            # cleaning de 2026-09-12 — el dato vive en el parquet aunque el
+            # codigo que lo genero se revirtiera; sin contarla, el universo
+            # no cuadra con las filas del conjunto
             conjuntos[c] = {
                 "train": int((est == "train").sum()),
                 "test": int((est == "test").sum()),
                 "filtered": int((est == "filtered").sum()),
+                "pre_2021": int((est == "pre-2021").sum()),
                 "abiertas": int(est.isna().sum()),
                 "servidas": int(g["version"].notna().sum()),
                 "calidad_media": round(float(g["score_calidad"].mean()), 3),
             }
-            # filas por ano de publicacion; las pre-2021 (fuera de la ventana
-            # de scrape pero presentes en los ZIPs) en un bucket propio
-            ano = g["fecha_publicacion"].dt.year
-            tempranas = int((ano < 2021).sum())
-            serie = (ano[ano >= 2021].astype("Int64").astype(str)
-                     .value_counts().sort_index())
-            por_ano[c] = ([["<2021", tempranas]] if tempranas else []) + [
-                [k, int(v)] for k, v in serie.items()]
         return {
             "filas": len(df), "columnas": n_cols,
             "mb": round(st.st_size / 1e6, 1),
             "modificado": datetime.fromtimestamp(st.st_mtime).isoformat(),
             "conjuntos": conjuntos,
-            "filas_por_ano": por_ano,
             "versiones_pred": {f"v{k}": int(v) for k, v
                                in df["version"].value_counts().items()},
         }
 
     return _cache((st.st_mtime_ns, st.st_size), _AGG_CACHE, calc)
+
+
+# --- EDA del parquet (panel Exploratorio de Datos) -----------------------------
+# Columnas del analisis EDA: identidad, objetivos y las dimensiones graficables.
+COLS_EDA = ["conjunto", "fecha_publicacion", "cpv_principal", "tipo_contrato",
+            "num_ofertas", "importe_con_iva", "importe_adj_con_iva",
+            "importe_sin_iva", "importe_adjudicacion"]
+DIMS_EDA = ("ano", "cpv", "tipo")
+
+
+def _r2(v) -> float | None:
+    """round(x, 2) con guardas NaN/vacio (NaN no es JSON)."""
+    return None if v is None or pd.isna(v) else round(float(v), 2)
+
+
+def _pct(n: int, total: int) -> float | None:
+    return round(100 * n / total, 1) if total else None
+
+
+def _serie_dim(cat: pd.Series, disc: pd.Series, num: pd.Series,
+               orden=None) -> dict:
+    """Agregados de una dimension: n, descuento medio y ofertas media por etiqueta.
+
+    orden=None ordena por n descendente (identidad en cpv/tipo); una key de
+    sort_index ordena por etiqueta (ano: cronologico con <2021 primero).
+    """
+    n = cat.value_counts()
+    if orden is not None:
+        n = n.reindex(sorted(n.index, key=orden))
+    desc = disc.groupby(cat).mean().reindex(n.index)
+    ofertas = num.groupby(cat).mean().reindex(n.index)
+    return {
+        "labels": n.index.astype(str).tolist(),
+        "n": n.astype(int).tolist(),
+        "desc": [_r2(v) for v in desc],
+        "ofertas": [_r2(v) for v in ofertas],
+    }
+
+
+def _eda(conjunto: str) -> dict:
+    """Stats basicas + agregados por dimension, cacheados por (mtime, conjunto)."""
+    p = DATA_DIR / "licitaciones.parquet"
+    st = p.stat()
+
+    def calc() -> dict:
+        df = pd.read_parquet(p, columns=COLS_EDA)
+        if conjunto != "ambos":
+            df = df[df["conjunto"] == conjunto]
+        # descuento derivable con el criterio de cleaning (con-IVA en
+        # licitaciones, sin-IVA en menores; negativos fuera, >70 truncados)
+        # y num_ofertas valido — las medias van sobre poblacion evaluable
+        es_lic = df["conjunto"] == "licitaciones"
+        base = df["importe_con_iva"].where(es_lic, df["importe_sin_iva"])
+        adj = df["importe_adj_con_iva"].where(es_lic, df["importe_adjudicacion"])
+        disc = (1 - adj / base) * 100
+        disc = disc.where(base.notna() & (base > 0) & adj.notna()
+                          & (disc >= 0)).clip(upper=cleaning.DISCOUNT_RANGE[1])
+        num = df["num_ofertas"].where(
+            df["num_ofertas"].between(*cleaning.NUM_OFERTAS_RANGE))
+        n_disc, n_num = int(disc.notna().sum()), int(num.notna().sum())
+
+        # ano de publicacion, historial completo (cada ano su barra, tambien
+        # los pre-2021), con la misma reparacion que cleaning.fix_ano (bug
+        # del feed de anos a dos digitos; fuera de 2000..hoy = s/d);
+        # cpv por division (2 primeros digitos)
+        ano = cleaning.fix_ano(df["fecha_publicacion"].dt.year)
+        cat_ano = ano.astype("Int64").astype(str).where(ano.notna())
+        cat_cpv = (df["cpv_principal"].astype("string").str.slice(0, 2)
+                   .fillna("s/d"))
+        cat_tipo = df["tipo_contrato"].fillna("s/d")
+
+        return {
+            "filtro": {"conjunto": conjunto},
+            "modificado": datetime.fromtimestamp(st.st_mtime).isoformat(),
+            # firma de version de las figuras: cambia con el parquet (mtime)
+            # O con el codigo que agrega/pinta (api.py, graficas.py) — la URL
+            # del <img> la lleva para que el navegador no sirva un SVG viejo
+            # cacheado como inmutable tras tocar el render
+            "v": "-".join(str(x) for x in (
+                st.st_mtime_ns, Path(__file__).stat().st_mtime_ns,
+                (ROOT / "Dashboard" / "graficas.py").stat().st_mtime_ns)),
+            "stats": {
+                "filas": len(df),
+                "descuento_medio": _r2(disc.mean()), "n_disc": n_disc,
+                "pct_ceros": _pct(int((disc == 0).sum()), n_disc),
+                "ofertas_media": _r2(num.mean()), "n_ofertas": n_num,
+                "pct_sin_ofertas": _pct(int((num == 0).sum()), n_num),
+            },
+            "dims": {
+                "ano": _serie_dim(cat_ano, disc, num, orden=lambda ix: ix),
+                "cpv": _serie_dim(cat_cpv, disc, num),
+                "tipo": _serie_dim(cat_tipo, disc, num),
+            },
+        }
+
+    return _cache((st.st_mtime_ns, st.st_size, conjunto),
+                  _EDA_CACHE.setdefault(conjunto, {}), calc)
 
 
 def _version_expuesta() -> str:
@@ -358,6 +469,47 @@ def status() -> dict:
 @app.get("/datos")
 def datos() -> dict:
     return _agregados()
+
+
+@app.get("/eda")
+def eda(conjunto: str = "ambos") -> dict:
+    """Stats basicas + agregados por dimension del parquet (panel EDA de Datos).
+
+    ?conjunto=ambos|licitaciones|menores. Filas cuenta todo el filtro; las
+    medias (% descuento, nº ofertas) van solo sobre poblacion evaluable —
+    descuento derivable en [0, 70] (criterio de cleaning) y num_ofertas en
+    [0, 50]. Cacheado por (mtime, conjunto): cambiar filtro no relee el
+    parquet si ya esta computado.
+    """
+    if conjunto not in ("ambos", *CONJUNTOS):
+        raise HTTPException(400, "conjunto debe ser ambos|licitaciones|menores")
+    return _eda(conjunto)
+
+
+@app.get("/eda/fig/{dim}")
+def eda_fig(dim: str, conjunto: str = "ambos", tema: str = "claro") -> Response:
+    """La figura de una dimension como SVG matplotlib (Dashboard/graficas.py).
+
+    Barras = nº licitaciones por etiqueta; lineas = descuento medio (%) y nº
+    ofertas medio. El dato sale del cache de /eda y el SVG se cachea por
+    (dim, conjunto, tema) con firma de mtime — la URL del <img> versiona con
+    &v=<modificado>, asi el navegador trata cada version como inmutable.
+    """
+    if dim not in DIMS_EDA:
+        raise HTTPException(400, f"dimension desconocida: {dim} "
+                                 f"(validas: {'|'.join(DIMS_EDA)})")
+    if conjunto not in ("ambos", *CONJUNTOS):
+        raise HTTPException(400, "conjunto debe ser ambos|licitaciones|menores")
+    if tema not in graficas.TEMAS:
+        raise HTTPException(400, "tema debe ser claro|oscuro")
+    d = _eda(conjunto)["dims"][dim]
+    st = (DATA_DIR / "licitaciones.parquet").stat()
+    cache = _EDA_FIG_CACHE.setdefault((dim, conjunto, tema), {})
+    svg = _cache((st.st_mtime_ns, st.st_size), cache,
+                 lambda: graficas.fig_eda(d["labels"], d["n"], d["desc"],
+                                           d["ofertas"], tema, conjunto))
+    return Response(content=svg, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=604800, immutable"})
 
 
 @app.get("/modelos")

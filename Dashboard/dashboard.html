@@ -110,6 +110,10 @@
     border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 13px;
     color: var(--text-primary);
   }
+  .op-row select {
+    background: var(--surface-1); border: 1px solid var(--ring); border-radius: 6px;
+    padding: 5px 8px; font: inherit; font-size: 13px; color: var(--text-primary);
+  }
   button.action.secundo { background: var(--surface-1); color: var(--text-primary);
                           border: 1px solid var(--ring); }
   button.action.secundo:hover { background: var(--surface-1); border-color: var(--accent); }
@@ -141,7 +145,6 @@
            border: 1px dashed var(--baseline); border-radius: 10px; padding: 18px 20px;
            max-width: 78ch; }
 
-  footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   a { color: var(--accent); }
   .loading { color: var(--muted); font-size: 13px; }
 </style>
@@ -163,42 +166,54 @@
 <!-- ========================= PANEL 1: DATOS ========================= -->
 <section id="panel-datos" role="tabpanel" aria-labelledby="tab-datos">
   <p class="panel-intro">
-    Análisis del parquet en memoria (<code>Data/licitaciones.parquet</code>): universo por
-    ciclo de vida, actividad por año de publicación y calidad. Los agregados los calcula la
-    API leyendo el almacén y los cachea por mtime — el poll de 10 s no relee los 600 MB.
+    EDA del parquet en memoria (<code>Data/licitaciones.parquet</code>):
+    <span id="datos-meta">cargando…</span>. Barras = nº de licitaciones;
+    líneas = descuento medio y nº de ofertas medio. Histórico completo,
+    también pre-2021.
   </p>
-  <div class="kpi-row" id="datos-kpis"><span class="loading">cargando datos…</span></div>
-  <div style="height:14px"></div>
-  <div class="chart-grid">
-    <figure class="card" id="universo-card">
-      <figcaption><b>Universo por ciclo de vida</b> — filas por conjunto</figcaption>
-      <div id="universo-chart"></div>
-      <button class="tbl-toggle" onclick="toggleTable('universo-table')">vista tabla</button>
-    </figure>
-    <figure class="card" id="anos-card-licitaciones">
-      <figcaption><b>Filas por año de publicación</b> — licitaciones</figcaption>
-      <div id="anos-chart-licitaciones"></div>
-      <button class="tbl-toggle" onclick="toggleTable('anos-table-licitaciones')">vista tabla</button>
-    </figure>
-    <figure class="card" id="anos-card-menores">
-      <figcaption><b>Filas por año de publicación</b> — menores</figcaption>
-      <div id="anos-chart-menores"></div>
-      <button class="tbl-toggle" onclick="toggleTable('anos-table-menores')">vista tabla</button>
-    </figure>
+  <div class="op-row" style="margin-bottom:12px">
+    <label for="eda-conjunto">conjunto</label>
+    <select id="eda-conjunto">
+      <option value="ambos">ambos</option>
+      <option value="licitaciones">regulares</option>
+      <option value="menores">menores</option>
+    </select>
+    <label for="eda-dim">eje x</label>
+    <select id="eda-dim">
+      <option value="ano">año de publicación</option>
+      <option value="cpv">división CPV</option>
+      <option value="tipo">tipo de contrato</option>
+    </select>
+    <button class="action" onclick="cargarEda()">Actualizar</button>
+    <span class="op-note" id="eda-note" style="margin:0"></span>
   </div>
+  <div class="kpi-row" id="eda-kpis"><span class="loading">cargando…</span></div>
+  <div style="height:14px"></div>
+  <figure class="card" style="max-width:900px;margin:0 auto">
+    <figcaption><b id="eda-fig-cap">Licitaciones por año de publicación</b> —
+      barras: nº licitaciones · líneas: media por columna (eje derecho)</figcaption>
+    <div id="eda-fig"><span class="loading">computando…</span></div>
+    <button class="tbl-toggle" onclick="toggleTable('eda-table')">vista tabla</button>
+  </figure>
+  <table id="eda-table" hidden>
+    <thead><tr><th id="eda-th-dim">Categoría</th>
+      <th class="num">Licitaciones</th><th class="num">Descuento medio</th>
+      <th class="num">Ofertas media</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div style="height:22px"></div>
+  <figure class="card" id="universo-card">
+    <figcaption><b>Universo por ciclo de vida</b> — filas por conjunto</figcaption>
+    <div id="universo-chart"></div>
+    <button class="tbl-toggle" onclick="toggleTable('universo-table')">vista tabla</button>
+  </figure>
   <table id="universo-table" hidden>
     <thead><tr>
       <th>Conjunto</th><th class="num">Train</th><th class="num">Test</th>
-      <th class="num">Filtered</th><th class="num">Abiertas</th>
+      <th class="num">Filtered</th><th class="num">Pre-2021</th><th class="num">Abiertas</th>
       <th class="num">Servidas</th><th class="num">Calidad media</th><th class="num">Total</th>
     </tr></thead>
     <tbody></tbody>
-  </table>
-  <table id="anos-table-licitaciones" hidden>
-    <thead><tr><th>Año de publicación</th><th class="num">Filas</th></tr></thead><tbody></tbody>
-  </table>
-  <table id="anos-table-menores" hidden>
-    <thead><tr><th>Año de publicación</th><th class="num">Filas</th></tr></thead><tbody></tbody>
   </table>
   <div style="height:8px"></div>
   <div id="versiones-pred"></div>
@@ -296,15 +311,6 @@
   </section>
 </section>
 
-<footer>
-  Evaluación = el sistema expuesto re-inferido sobre las filas ml_estado='test' (cerradas
-  nunca vistas por el entrenamiento), filtradas por los criterios de cleaning — las preds
-  nunca se persisten en esas filas. curso = estado del modelo expuesto (se sobreescribe);
-  prepromote = cierre del modelo que va a ser reemplazado (histórico). Ciclo (botón
-  «Lanzar ciclo»): update marca test → evaluate cierra el expuesto → cleaning pliega a
-  train → featurer → training. Todo op corre como subprocess con log en Data/ops/.
-</footer>
-
 <script>
 const DS_COLORS = {licitaciones: "var(--series-1)", menores: "var(--series-2)"};
 const fmt = n => n == null ? "—" :
@@ -391,31 +397,26 @@ function renderChips(s) {
 }
 
 // ================================================================ PANEL 1: DATOS
-function renderDatos(d) {
-  const cs = d.conjuntos || {};
-  const tot = c => cs[c] ? cs[c].train + cs[c].test + cs[c].filtered + cs[c].abiertas : 0;
-  const servidas = (cs.licitaciones?.servidas || 0) + (cs.menores?.servidas || 0);
-  const test = (cs.licitaciones?.test || 0) + (cs.menores?.test || 0);
-  document.getElementById("datos-kpis").innerHTML = [
-    {label: "filas totales", value: fmt(d.filas), delta: `${d.columnas} columnas · ${d.mb} MB`},
-    {label: "licitaciones", value: fmt(tot("licitaciones")), delta: `calidad media ${cs.licitaciones?.calidad_media ?? "—"}`},
-    {label: "menores", value: fmt(tot("menores")), delta: `calidad media ${cs.menores?.calidad_media ?? "—"}`},
-    {label: "test (pool evaluación)", value: fmt(test), delta: "cerradas nuevas sin plegar a train"},
-    {label: "servidas (preds)", value: fmt(servidas), delta: Object.keys(d.versiones_pred || {}).length
-        ? Object.entries(d.versiones_pred).map(([v, n]) => `${v}: ${fmt(n)}`).join(" · ")
-        : "ninguna persistida aún"},
-    {label: "modificado", value: (d.modificado || "").slice(0, 10),
-     delta: (d.modificado || "").slice(11, 16) + " UTC-local"},
-  ].map(t => `<div class="tile"><div class="label">${esc(t.label)}</div>
-      <div class="value">${esc(t.value)}</div><div class="delta">${esc(t.delta)}</div></div>`).join("");
+let DATOS = null;  // respuesta /datos: el universo se refiltra al cambiar el conjunto
 
-  // barras apiladas por ciclo de vida (train/test/filtered/abiertas) por conjunto
-  const el = document.getElementById("universo-chart");
-  const keys = ["train", "test", "filtered", "abiertas"];
-  const KEYS_ES = {train: "train", test: "test", filtered: "filtered", abiertas: "abiertas"};
-  const LC_COLORS = ["var(--series-1)", "var(--series-2)", "var(--baseline)", "var(--grid)"];
+function renderDatos(d) {
+  DATOS = d;
+  const cs = d.conjuntos || {};
+  const seleccion = document.getElementById("eda-conjunto").value;
+  document.getElementById("datos-meta").textContent =
+    `${fmt(d.filas)} filas · ${d.columnas} columnas · ${d.mb} MB · ` +
+    `modificado ${(d.modificado || "").replace("T", " ").slice(0, 16)}`;
+
+  // barras apiladas por ciclo de vida (train/test/filtered/pre-2021/
+  // abiertas) del conjunto seleccionado (los dos cuando "ambos") + tabla
+  const activos = seleccion === "ambos" ? Object.keys(cs) : [seleccion];
+  const keys = ["train", "test", "filtered", "pre_2021", "abiertas"];
+  const KEYS_ES = {train: "train", test: "test", filtered: "filtered",
+                   pre_2021: "pre-2021", abiertas: "abiertas"};
+  const LC_COLORS = ["var(--series-1)", "var(--series-2)", "var(--baseline)",
+                     "var(--muted)", "var(--grid)"];
   const rows = [];
-  for (const ds of Object.keys(cs)) {
+  for (const ds of activos) {
     const u = cs[ds];
     const total = keys.reduce((a, k) => a + (u[k] || 0), 0) || 1;
     const segs = keys.map((k, i) =>
@@ -427,37 +428,92 @@ function renderDatos(d) {
         <span style="font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums">${fmt(total)} filas</span>
       </div>`);
   }
-  el.innerHTML = rows.join("") + `
+  document.getElementById("universo-chart").innerHTML = rows.join("") + `
     <div style="display:flex;gap:12px;font-size:11px;color:var(--text-secondary);margin-top:6px">
       ${keys.map((k, i) => `<span style="display:inline-flex;align-items:center;gap:4px">
         <span style="width:10px;height:10px;border-radius:2px;background:${LC_COLORS[i]}"></span>${KEYS_ES[k]}</span>`).join("")}
     </div>`;
 
-  // tabla gemela del universo
-  const tb = document.querySelector("#universo-table tbody");
-  tb.innerHTML = Object.entries(cs).map(([ds, u]) => {
-    const total = keys.reduce((a, k) => a + (u[k] || 0), 0);
+  document.querySelector("#universo-table tbody").innerHTML = activos.map(ds => {
+    const u = cs[ds], total = keys.reduce((a, k) => a + (u[k] || 0), 0);
     return `<tr><td>${esc(ds)}</td><td class="num">${fmt(u.train)}</td>
       <td class="num">${fmt(u.test)}</td><td class="num">${fmt(u.filtered)}</td>
-      <td class="num">${fmt(u.abiertas)}</td><td class="num">${fmt(u.servidas)}</td>
+      <td class="num">${fmt(u.pre_2021)}</td><td class="num">${fmt(u.abiertas)}</td>
+      <td class="num">${fmt(u.servidas)}</td>
       <td class="num">${u.calidad_media ?? "—"}</td><td class="num">${fmt(total)}</td></tr>`;
   }).join("");
 
-  // filas por año de publicación: barras verticales por conjunto + tabla gemela
-  for (const [ds, pares] of Object.entries(d.filas_por_ano || {})) {
-    document.getElementById("anos-chart-" + ds).innerHTML = barrasAnos(pares, ds);
-    document.querySelector("#anos-table-" + ds + " tbody").innerHTML =
-      pares.map(([a, n]) => `<tr><td>${esc(a)}</td><td class="num">${fmt(n)}</td></tr>`).join("");
-  }
-
   // versiones de preds servidas, si las hay
-  const vp = document.getElementById("versiones-pred");
   const vpd = d.versiones_pred || {};
-  vp.innerHTML = Object.keys(vpd).length ? `
+  document.getElementById("versiones-pred").innerHTML = Object.keys(vpd).length ? `
     <h2>Preds servidas por versión</h2>
     <table><thead><tr><th>Versión</th><th class="num">Filas</th></tr></thead>
     <tbody>${Object.entries(vpd).map(([v, n]) =>
       `<tr><td>${esc(v)}</td><td class="num">${fmt(n)}</td></tr>`).join("")}</tbody></table>` : "";
+}
+
+// ------------------------------------------------------------------ EDA
+// La stats básicas las pinta JS desde /eda; las figuras son SVG matplotlib
+// servido por /eda/fig/{dim} — el <picture> elige claro/oscuro por tema del
+// SO y &v=<modificado> versiona la URL (el navegador cachea inmutable).
+const EDA_DIM_LABEL = {ano: "año de publicación", cpv: "división CPV",
+                       tipo: "tipo de contrato"};
+const EDA_CONJ_LABEL = {ambos: "ambos conjuntos",
+                        licitaciones: "licitaciones (regulares)", menores: "menores"};
+
+async function cargarEda() {
+  const conjunto = document.getElementById("eda-conjunto").value;
+  const dim = document.getElementById("eda-dim").value;
+  const note = document.getElementById("eda-note");
+  const fig = document.getElementById("eda-fig");
+  note.className = "op-note"; note.style.margin = "0";
+  note.textContent = "computando…";
+  fig.innerHTML = `<span class="loading">computando (la primera vez lee el parquet)…</span>`;
+  try {
+    const r = await fetch("/eda?conjunto=" + conjunto);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || r.statusText);
+    renderEda(j, dim);
+    if (DATOS) renderDatos(DATOS);  // el universo sigue al filtro de conjunto
+    note.textContent = "";
+  } catch (e) {
+    note.className = "op-note err";
+    note.textContent = String(e.message || e);
+  }
+}
+
+function renderEda(eda, dim) {
+  const s = eda.stats || {};
+  const d = (eda.dims || {})[dim] || {labels: [], n: [], desc: [], ofertas: []};
+  const conjunto = eda.filtro?.conjunto || "ambos";
+  document.getElementById("eda-kpis").innerHTML = [
+    {label: "licitaciones (filas)", value: fmt(s.filas),
+     delta: EDA_CONJ_LABEL[conjunto] || ""},
+    {label: "descuento medio", value: s.descuento_medio == null ? "—" : s.descuento_medio + " %",
+     delta: `sobre ${fmt(s.n_disc)} con descuento derivable`},
+    {label: "% descuento cero", value: s.pct_ceros == null ? "—" : s.pct_ceros + " %",
+     delta: "adjudicadas a presupuesto"},
+    {label: "ofertas media", value: s.ofertas_media ?? "—",
+     delta: `sobre ${fmt(s.n_ofertas)} con recuento válido`},
+    {label: "% sin ofertas", value: s.pct_sin_ofertas == null ? "—" : s.pct_sin_ofertas + " %",
+     delta: `de ${fmt(s.n_ofertas)} con recuento válido`},
+  ].map(t => `<div class="tile"><div class="label">${esc(t.label)}</div>
+      <div class="value">${esc(t.value)}</div><div class="delta">${esc(t.delta)}</div></div>`).join("");
+
+  const src = t => `/eda/fig/${dim}?conjunto=${conjunto}&tema=${t}` +
+    `&v=${encodeURIComponent(eda.v || eda.modificado || "")}`;
+  document.getElementById("eda-fig-cap").textContent =
+    "Licitaciones por " + EDA_DIM_LABEL[dim];
+  document.getElementById("eda-fig").innerHTML =
+    `<picture><source media="(prefers-color-scheme: dark)" srcset="${src("oscuro")}">` +
+    `<img src="${src("claro")}" loading="lazy" alt="Licitaciones por ${EDA_DIM_LABEL[dim]}: ` +
+    `barras con el número de licitaciones y líneas con el descuento medio y el número ` +
+    `de ofertas medio" style="width:100%;height:auto"></picture>`;
+  document.getElementById("eda-th-dim").textContent = EDA_DIM_LABEL[dim];
+  document.querySelector("#eda-table tbody").innerHTML = d.labels.map((l, i) =>
+    `<tr><td>${esc(l)}</td><td class="num">${fmt(d.n[i])}</td>
+     <td class="num">${d.desc[i] == null ? "—" : d.desc[i] + " %"}</td>
+     <td class="num">${d.ofertas[i] ?? "—"}</td></tr>`).join("");
 }
 
 // ========================================================== PANEL 2: LABORATORIO
@@ -797,32 +853,6 @@ async function verLog(op, runId) {
 }
 
 // ------------------------------------------------------------------ gráficos
-// Barras verticales: [[etiqueta, n], ...] — identidad, un hueco por conjunto.
-function barrasAnos(pares, ds) {
-  if (!pares.length) return `<span class="loading">sin filas</span>`;
-  const W = 340, H = 150, PAD_L = 40, PAD_R = 8, PAD_T = 10, PAD_B = 24;
-  const max = Math.max(...pares.map(p => p[1])) * 1.05 || 1;
-  const bw = (W - PAD_L - PAD_R) / pares.length;
-  const yOf = v => PAD_T + (1 - v / max) * (H - PAD_T - PAD_B);
-  const ticks = [0, 0.5, 1].map(t => {
-    const v = t * max, y = yOf(v);
-    return `<line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>
-      <text x="${PAD_L - 6}" y="${y + 3}" text-anchor="end" font-size="10" fill="var(--muted)">${fmt(Math.round(v))}</text>`;
-  }).join("");
-  const barras = pares.map(([k, n], i) => {
-    const x = PAD_L + i * bw, y = yOf(n);
-    return `<rect x="${(x + 1.5).toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(1, bw - 3).toFixed(1)}"
-        height="${(H - PAD_B - y).toFixed(1)}" rx="2" fill="${DS_COLORS[ds] || "var(--series-1)"}"><title>${esc(k)}: ${fmt(n)} filas</title></rect>`;
-  }).join("");
-  const etiquetas = pares.map(([k], i) => {
-    const salta = pares.length > 9 && i % 2 === 1 ? "" :
-      `<text x="${(PAD_L + i * bw + bw / 2).toFixed(1)}" y="${H - 8}" text-anchor="middle" font-size="9" fill="var(--muted)">${esc(k)}</text>`;
-    return salta;
-  }).join("");
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" role="img"
-    aria-label="Filas por año de publicación de ${esc(ds)}">${ticks}${barras}${etiquetas}</svg>`;
-}
-
 // Línea multi-versión (una serie, un hueco por tarjeta).
 function lineChart(pts, ds) {
   const W = 340, H = 150, PAD_L = 38, PAD_R = 14, PAD_T = 10, PAD_B = 26;
@@ -858,6 +888,7 @@ function toggleTable(id) {
 // ---------------------------------------------------------------- arranque
 refresh();
 cargarDatos();
+cargarEda();
 cargarModelos();
 cargarLaboratorio();
 cargarEvaluaciones();
